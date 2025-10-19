@@ -6,25 +6,40 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import re
-from sentence_transformers import SentenceTransformer
+from openai import OpenAI
 
 from .config import get_settings
 
 
-_EMBED_MODEL: SentenceTransformer | None = None
+_EMBED_MODEL_NAME = "text-embedding-3-small"
+_OPENAI_CLIENT: OpenAI | None = None
 
 
-def _get_model() -> SentenceTransformer:
-    global _EMBED_MODEL
-    if _EMBED_MODEL is None:
-        _EMBED_MODEL = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
-    return _EMBED_MODEL
+def _get_openai_client() -> OpenAI:
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is None:
+        _OPENAI_CLIENT = OpenAI()
+    return _OPENAI_CLIENT
 
 
 def embed_text(text: str) -> List[float]:
-    model = _get_model()
-    embedding = model.encode([text], normalize_embeddings=True)[0]
-    return embedding.tolist()
+    client = _get_openai_client()
+    response = client.embeddings.create(
+        model=_EMBED_MODEL_NAME,
+        input=text,
+    )
+    return response.data[0].embedding
+
+
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    if not texts:
+        return []
+    client = _get_openai_client()
+    response = client.embeddings.create(
+        model=_EMBED_MODEL_NAME,
+        input=texts,
+    )
+    return [item.embedding for item in response.data]
 
 
 @dataclass
@@ -140,7 +155,6 @@ def _keyword_document_matches(
     if not documents:
         return []
 
-    model = _get_model()
     hits: List[ChunkHit] = []
 
     for doc in documents:
@@ -153,8 +167,10 @@ def _keyword_document_matches(
             .execute()
         )
         chunk_rows = chunk_resp.data or []
-        for row in chunk_rows:
-            chunk_embedding = model.encode([row["content"]], normalize_embeddings=True)[0]
+        chunk_texts = [row["content"] for row in chunk_rows]
+        embeddings = embed_texts(chunk_texts)
+        for row, emb in zip(chunk_rows, embeddings):
+            chunk_embedding = np.array(emb, dtype=float)
             similarity = float(np.dot(question_embedding, chunk_embedding))
             hit = ChunkHit(
                 document_id=row["document_id"],
