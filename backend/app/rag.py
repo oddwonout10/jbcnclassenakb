@@ -12,7 +12,7 @@ from openai import OpenAI
 from .config import get_settings
 
 
-_EMBED_MODEL_NAME = "text-embedding-3-large"
+_EMBED_MODEL_NAME = "text-embedding-3-small"
 _OPENAI_CLIENT: OpenAI | None = None
 
 
@@ -38,7 +38,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     client = _get_openai_client()
     response = client.embeddings.create(
         model=_EMBED_MODEL_NAME,
-        input="tell me about nashik trip",
+        input=texts,
     )
     return [item.embedding for item in response.data]
 
