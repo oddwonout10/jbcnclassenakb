@@ -1,0 +1,50 @@
+# General
+.DS_Store
+.idea/
+.vscode/
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Python / FastAPI / Ingestion
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+*.egg-info/
+.eggs/
+.mypy_cache/
+.venv/
+venv/
+env/
+.env
+backend/.env
+backend/.env.*
+*.pickle
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.vercel/
+frontend/.swc/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build artifacts
+dist/
+build/
+*.lock
+
+# Supabase exports
+supabase/.branches
+supabase/.branches/*
