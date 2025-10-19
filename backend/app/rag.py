@@ -13,6 +13,7 @@ from .config import get_settings
 
 
 _EMBED_MODEL_NAME = "text-embedding-3-small"
+_EMBED_DIMENSION = 768
 _OPENAI_CLIENT: OpenAI | None = None
 
 
@@ -29,7 +30,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
     for idx, txt in enumerate(texts):
-        print(
+        logger.info(
             "Embedding batch item %d (%d chars) first 120: %s",
             idx + 1,
             len(txt),
@@ -39,6 +40,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     response = client.embeddings.create(
         model=_EMBED_MODEL_NAME,
         input=texts,
+        dimensions=_EMBED_DIMENSION,
     )
     return [item.embedding for item in response.data]
 
