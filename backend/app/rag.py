@@ -6,40 +6,51 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import re
+import logging
 from openai import OpenAI
 
 from .config import get_settings
 
 
-_EMBED_MODEL_NAME = "text-embedding-3-small"
+_EMBED_MODEL_NAME = "text-embedding-3-large"
 _OPENAI_CLIENT: OpenAI | None = None
 
 
-def _get_openai_client() -> OpenAI:
-    global _OPENAI_CLIENT
-    if _OPENAI_CLIENT is None:
-        _OPENAI_CLIENT = OpenAI()
-    return _OPENAI_CLIENT
+logger = logging.getLogger(__name__)
 
 
 def embed_text(text: str) -> List[float]:
-    client = _get_openai_client()
-    response = client.embeddings.create(
-        model=_EMBED_MODEL_NAME,
-        input=text,
-    )
-    return response.data[0].embedding
+    logger.info("Embedding single text (%d chars) first 120: %s", len(text), text[:120])
+    embeddings = embed_texts([text])
+    return embeddings[0] if embeddings else []
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
+    for idx, txt in enumerate(texts):
+        print(
+            "Embedding batch item %d (%d chars) first 120: %s",
+            idx + 1,
+            len(txt),
+            txt[:120],
+        )
     client = _get_openai_client()
     response = client.embeddings.create(
         model=_EMBED_MODEL_NAME,
-        input=texts,
+        input="tell me about nashik trip",
     )
     return [item.embedding for item in response.data]
+
+
+def _get_openai_client() -> OpenAI:
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is None:
+        settings = get_settings()
+        if not settings.openai_api_key:
+            raise RuntimeError("OpenAI API key is not configured. Set OPENAI_API_KEY in the environment.")
+        _OPENAI_CLIENT = OpenAI(api_key=settings.openai_api_key)
+    return _OPENAI_CLIENT
 
 
 @dataclass
