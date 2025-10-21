@@ -156,7 +156,11 @@ def _verify_turnstile(token: str, secret: str, remote_ip: str | None) -> bool:
         )
         response.raise_for_status()
         data = response.json()
-        return bool(data.get("success"))
+        if data.get("success"):
+            return True
+        errors = data.get("error-codes") or data.get("errorCodes")
+        logger.warning("Turnstile verification failed: %s", errors)
+        return False
     except Exception as exc:  # pragma: no cover - network errors
         logger.warning("Turnstile verification error: %s", exc)
         return False
@@ -301,7 +305,10 @@ def answer_question(
     if not question:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question cannot be empty.")
 
-    if settings.turnstile_secret_key:
+    env_label = (settings.app_env or "").lower()
+    captcha_required = bool(settings.turnstile_secret_key) and env_label not in {"local", "dev", "development"}
+
+    if captcha_required:
         if not payload.captcha_token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

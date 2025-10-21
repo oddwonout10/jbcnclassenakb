@@ -161,15 +161,20 @@ export function AssistantPanel() {
         throw new Error("Backend URL is not configured.");
       }
 
+      const payload: {
+        question: string;
+        captcha_token?: string;
+      } = { question: trimmed };
+      if (captchaToken) {
+        payload.captcha_token = captchaToken;
+      }
+
       const response = await fetch(`${backendUrl}/qa`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          question: trimmed,
-          captcha_token: captchaToken,
-        }),
+        body: JSON.stringify(payload),
       });
 
       let parsed: QAResponse | { detail?: string } | null = null;
