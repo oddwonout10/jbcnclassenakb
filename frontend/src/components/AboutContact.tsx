@@ -16,8 +16,9 @@ export function AboutContact() {
           </h2>
           <p className="text-sm text-[#4e5d78]">
             Every answer and download you see here comes from the announcements posted
-            in the Toddle app. Circulars are ingested as soon as they are uploaded on a best effort basis so
-            expect a delay when I'm super busy. This site is only for your convinence, for latest always refer to Toddle app. 
+            in the Toddle app. Circulars are ingested as soon as they are uploaded on a
+            best-effort basis, so expect a delay when I&apos;m super busy. This site is for
+            convenience—always refer to the Toddle app for the latest information.
           </p>
           <p className="text-sm text-[#4e5d78]">
             If you spot a bug, can&apos;t find an update, or have ideas to make this
