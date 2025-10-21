@@ -175,14 +175,16 @@ export function AssistantPanel() {
       let parsed: QAResponse | { detail?: string } | null = null;
       try {
         parsed = (await response.json()) as QAResponse | { detail?: string };
-      } catch (_error) {
+      } catch {
         parsed = null;
       }
 
+      const maybeDetail = parsed && !("sources" in parsed) ? parsed.detail : undefined;
+
       if (!response.ok || !parsed || !("sources" in parsed)) {
         const detail =
-          typeof parsed?.detail === "string"
-            ? parsed.detail
+          typeof maybeDetail === "string"
+            ? maybeDetail
             : response.status === 503
               ? "The knowledge base is temporarily unavailable. The class parent has been notified."
               : response.status === 429
