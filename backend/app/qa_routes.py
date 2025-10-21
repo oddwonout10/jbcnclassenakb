@@ -18,6 +18,19 @@ from .manual_context import match_manual_facts
 from .rag import ChunkHit, embed_text, fetch_relevant_chunks
 from .supabase_client import get_supabase_client
 from .rate_limiter import RateLimiter
+from .temporal_context import (
+    current_ist,
+    infer_date_references,
+    fetch_calendar_events_for_window,
+    determine_holiday_answer,
+    format_event_summary,
+    build_reference_hint,
+    format_date,
+    HOLIDAY_KEYWORDS,
+    parse_date_range_from_text,
+    upcoming_holiday_event,
+    upcoming_break_from_matches,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -166,7 +179,12 @@ def _verify_turnstile(token: str, secret: str, remote_ip: str | None) -> bool:
         return False
 
 
-def _build_prompt(question: str, hits: List[ChunkHit], metadata: Dict[str, dict]) -> str:
+def _build_prompt(
+    question: str,
+    hits: List[ChunkHit],
+    metadata: Dict[str, dict],
+    temporal_hints: Optional[List[str]] = None,
+) -> str:
     grouped: OrderedDict[str, List[ChunkHit]] = OrderedDict()
     for hit in hits:
         grouped.setdefault(hit.document_id, []).append(hit)
@@ -216,8 +234,14 @@ def _build_prompt(question: str, hits: List[ChunkHit], metadata: Dict[str, dict]
         " Keep tone warm, concise, and factual."
     )
 
+    temporal_section = ""
+    if temporal_hints:
+        hint_lines = "\n".join(f"- {hint}" for hint in temporal_hints)
+        temporal_section = f"Additional temporal context:\n{hint_lines}\n\n"
+
     prompt = (
         f"{instructions}\n\n"
+        f"{temporal_section}"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n\n"
         "Answer in 3-6 sentences."
@@ -320,6 +344,182 @@ def answer_question(
                 detail="Verification failed. Please try again.",
             )
 
+    now_ist = current_ist()
+    temporal_hints: List[str] = [f"Today is {format_date(now_ist.date())} (IST)."]
+    date_references = infer_date_references(question, now_ist)
+    event_hint_lines: List[str] = []
+    holiday_result: Optional[dict] = None
+
+    calendar_matches = fetch_calendar_context(client, question, payload.grade)
+
+    for reference in date_references:
+        hint = build_reference_hint(reference)
+        if hint:
+            temporal_hints.append(hint)
+        if reference.target_date:
+            events = fetch_calendar_events_for_window(client, reference.target_date)
+            if events:
+                for event in events:
+                    event_hint_lines.append(format_event_summary(event))
+                if holiday_result is None:
+                    holiday_result = determine_holiday_answer(reference, events)
+        elif reference.range_start and reference.range_end:
+            range_length = (reference.range_end - reference.range_start).days
+            midpoint = reference.range_start + dt.timedelta(days=range_length // 2)
+            window = max(7, range_length + 1)
+            events = fetch_calendar_events_for_window(client, midpoint, window)
+            for event in events:
+                event_hint_lines.append(format_event_summary(event))
+
+    for match in calendar_matches or []:
+        summary = match.get("summary")
+        if summary:
+            event_hint_lines.append(summary)
+
+    if event_hint_lines:
+        seen: set[str] = set()
+        for line in event_hint_lines:
+            if line in seen:
+                continue
+            seen.add(line)
+            temporal_hints.append(f"Calendar note: {line}")
+            if len(temporal_hints) >= 8:
+                break
+
+    if holiday_result is None and date_references:
+        for reference in date_references:
+            if not reference.target_date:
+                continue
+            for match in calendar_matches or []:
+                base_start = dt.date.fromisoformat(match["event_date"])
+                end_value = match.get("end_date")
+                base_end = dt.date.fromisoformat(end_value) if end_value else base_start
+                summary_full = match.get("summary") or ""
+                if not end_value and summary_full:
+                    parsed_start, parsed_end = parse_date_range_from_text(
+                        summary_full,
+                        reference.target_date.year,
+                    )
+                    if parsed_start:
+                        base_start = parsed_start
+                    if parsed_end:
+                        base_end = parsed_end
+                summary_text = summary_full.lower()
+                if base_start <= reference.target_date <= base_end and any(
+                    keyword in summary_text for keyword in HOLIDAY_KEYWORDS
+                ):
+                    resume = base_end + dt.timedelta(days=1)
+                    holiday_result = {
+                        "answer": (
+                            f"Yes, {reference.description or 'the requested date'} "
+                            f"({format_date(reference.target_date)}) falls during {match.get('title', 'the listed break')} "
+                            f"({format_date(base_start)} – {format_date(base_end)}). "
+                            f"Classes resume on {format_date(resume)}."
+                        ),
+                        "event": {
+                            "id": match.get("id") or match.get("title"),
+                            "title": match.get("title"),
+                            "source": match.get("source"),
+                            "summary": match.get("summary"),
+                            "description": match.get("summary"),
+                        },
+                        "start": base_start,
+                        "end": base_end,
+                        "resume": resume,
+                    }
+                    break
+            if holiday_result:
+                break
+
+    lower_question = question.lower()
+    upcoming_requested = any(
+        phrase in lower_question
+        for phrase in ["next holiday", "next break", "upcoming holiday", "upcoming break", "coming holiday", "coming break"]
+    ) or ("next" in lower_question and "break" in lower_question)
+
+    if holiday_result:
+        event = holiday_result["event"]
+        start = holiday_result["start"]
+        answer_text = holiday_result["answer"]
+        source = SourceInfo(
+            document_id=f"calendar:{event.get('id') or event.get('title')}",
+            title=event.get("title", "Calendar event"),
+            published_on=start.isoformat(),
+            original_filename=event.get("source") or "calendar",
+            signed_url=None,
+            storage_path="",
+            similarity=1.0,
+        )
+        _log_interaction(
+            client=client,
+            question=question,
+            answer=answer_text,
+            status_label="answered",
+            sources=[source],
+            similarity=None,
+            latency_ms=int((time.perf_counter() - start_time) * 1000),
+            model_name="deterministic-calendar",
+        )
+        return QAResponse(status="answered", answer=answer_text, sources=[source])
+
+    if holiday_result is None and upcoming_requested:
+        upcoming = upcoming_holiday_event(client, now_ist.date())
+        current_break = upcoming.get("current") if upcoming else None
+        next_break = upcoming.get("next") if upcoming else None
+
+        if (not current_break or not next_break) and calendar_matches:
+            fallback = upcoming_break_from_matches(calendar_matches, now_ist.date())
+            current_break = current_break or fallback.get("current")
+            next_break = next_break or fallback.get("next")
+        if current_break or next_break:
+            parts: List[str] = []
+            sources: List[SourceInfo] = []
+            if current_break:
+                parts.append(
+                    f"Right now, {current_break['title']} runs from {format_date(current_break['start'])} "
+                    f"to {format_date(current_break['end'])}. Classes resume on {format_date(current_break['resume'])}."
+                )
+                sources.append(
+                    SourceInfo(
+                        document_id=f"calendar:{current_break['title']}",
+                        title=current_break["title"],
+                        published_on=current_break["start"].isoformat(),
+                        original_filename=current_break.get("source") or "calendar",
+                        signed_url=None,
+                        storage_path="",
+                        similarity=1.0,
+                    )
+                )
+            if next_break:
+                parts.append(
+                    f"The next break is {next_break['title']} from {format_date(next_break['start'])} "
+                    f"to {format_date(next_break['end'])}. Classes resume on {format_date(next_break['resume'])}."
+                )
+                sources.append(
+                    SourceInfo(
+                        document_id=f"calendar:{next_break['title']}",
+                        title=next_break["title"],
+                        published_on=next_break["start"].isoformat(),
+                        original_filename=next_break.get("source") or "calendar",
+                        signed_url=None,
+                        storage_path="",
+                        similarity=1.0,
+                    )
+                )
+
+            answer_text = " ".join(parts)
+            _log_interaction(
+                client=client,
+                question=question,
+                answer=answer_text,
+                status_label="answered",
+                sources=sources,
+                similarity=None,
+                latency_ms=int((time.perf_counter() - start_time) * 1000),
+                model_name="deterministic-calendar",
+            )
+            return QAResponse(status="answered", answer=answer_text, sources=sources)
+
     embedding = embed_text(question)
 
     try:
@@ -350,8 +550,7 @@ def answer_question(
         _send_escalation_email(settings, payload, "Knowledge base unreachable (network/Supabase error).")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Knowledge base temporarily unavailable") from exc
 
-    calendar_matches = fetch_calendar_context(client, question, payload.grade)
-    for entry in calendar_matches:
+    for entry in calendar_matches or []:
         doc_id = f"calendar:{entry['title'].lower().replace(' ', '-')[:40]}"
         summary_content = entry["summary"]
         event_date = dt.date.fromisoformat(entry["event_date"])
@@ -428,7 +627,7 @@ def answer_question(
         _send_escalation_email(settings, payload, "No relevant documents met the similarity threshold.")
         return QAResponse(status="escalated", answer=answer_text, sources=[])
 
-    prompt = _build_prompt(question, hits, doc_meta)
+    prompt = _build_prompt(question, hits, doc_meta, temporal_hints=temporal_hints)
 
     try:
         model_answer, model_used = generate_answer(prompt, settings)

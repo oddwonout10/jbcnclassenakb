@@ -7,8 +7,8 @@ from typing import Dict, List
 
 KEYWORD_MAP = {
     "diwali": {"diwali"},
-    "break": {"break", "holiday"},
-    "holiday": {"holiday"},
+    "break": {"break", "holiday", "vacation"},
+    "holiday": {"holiday", "break", "vacation"},
     "reopen": {"reopen", "reopens", "resume"},
     "midterm": {"mid", "mid-term", "midterm"},
     "winter": {"winter"},
@@ -79,14 +79,35 @@ def fetch_calendar_context(client, question: str, grade: str | None = None) -> L
                     "base": base,
                     "title": row["title"],
                     "event_date": row["event_date"],
-                    "end_date": row.get("end_date"),
+                    "end_date": row.get("end_date") or row.get("event_date"),
                     "audience": set(row.get("audience") or []),
                     "source": row.get("source"),
                 },
             )
+            # Update event start/end bounds
+            try:
+                existing_start = dt.date.fromisoformat(record["event_date"])
+                candidate_start = dt.date.fromisoformat(row["event_date"])
+                if candidate_start < existing_start:
+                    record["event_date"] = row["event_date"]
+            except Exception:
+                record["event_date"] = row["event_date"]
+
+            existing_end_raw = record.get("end_date") or record.get("event_date")
+            try:
+                existing_end = dt.date.fromisoformat(existing_end_raw)
+            except Exception:
+                existing_end = None
+
+            candidate_end_value = row.get("end_date") or row.get("event_date")
+            try:
+                candidate_end = dt.date.fromisoformat(candidate_end_value)
+            except Exception:
+                candidate_end = None
+
+            if candidate_end and (existing_end is None or candidate_end > existing_end):
+                record["end_date"] = candidate_end_value
             record["audience"].update(row.get("audience") or [])
-            if row.get("end_date"):
-                record["end_date"] = row["end_date"]
 
     audience_whitelist = {"whole_school", "general"}
     grade_lower = (grade or "").lower()
