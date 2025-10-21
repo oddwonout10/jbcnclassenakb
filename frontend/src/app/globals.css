@@ -1,26 +1,52 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #fff7ed;
+  --foreground: #2f3142;
+  --accent-sky: #43c0f6;
+  --accent-coral: #ff6f61;
+  --accent-sun: #f9c846;
+  --accent-leaf: #4cc6a8;
+  --card-bg: #ffffff;
+  --card-shadow: 0 20px 45px rgba(20, 32, 66, 0.12);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-body {
-  background: var(--background);
+.app-body {
+  background: radial-gradient(circle at top left, rgba(67, 192, 246, 0.2), transparent 45%),
+    radial-gradient(circle at top right, rgba(249, 200, 70, 0.25), transparent 40%),
+    radial-gradient(circle at bottom left, rgba(76, 198, 168, 0.2), transparent 35%),
+    var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-body), "Nunito", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display), "Baloo 2", cursive;
+  letter-spacing: 0.01em;
+}
+
+p,
+small,
+span,
+li,
+button,
+textarea,
+input {
+  font-family: var(--font-body), "Nunito", system-ui, sans-serif;
+}
+
+::selection {
+  background: rgba(255, 176, 128, 0.5);
+  color: var(--foreground);
 }

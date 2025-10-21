@@ -79,22 +79,36 @@ def sanitize_filename(filename: str) -> str:
     return ascii_name
 
 
-def upload_file(storage_path: str, local_path: Path) -> None:
+def upload_file(storage_path: str, local_path: Path, *, force: bool = False) -> None:
     client = get_supabase_client()
     bucket = get_settings().storage_bucket
-    with local_path.open("rb") as file:
+    bucket_client = client.storage.from_(bucket)
+
+    def _upload(method: str) -> None:
+        with local_path.open("rb") as file_handle:
+            if method == "update":
+                bucket_client.update(storage_path, file_handle)
+            else:
+                bucket_client.upload(storage_path, file_handle, {"upsert": False})
+
+    if force:
         try:
-            client.storage.from_(bucket).upload(
-                storage_path,
-                file,
-                {"upsert": False},
-            )
+            _upload("update")
         except Exception as exc:
-            message = str(exc)
-            if "Duplicate" in message or "already exists" in message:
-                LOGGER.info("File %s already exists in storage. Skipping upload.", storage_path)
-                return
-            raise
+            LOGGER.info(
+                "Update failed for %s (%s); falling back to upload.", storage_path, exc
+            )
+            _upload("upload")
+        return
+
+    try:
+        _upload("upload")
+    except Exception as exc:
+        message = str(exc)
+        if "Duplicate" in message or "already exists" in message:
+            LOGGER.info("File %s already exists in storage. Skipping upload.", storage_path)
+            return
+        raise
 
 
 def insert_document_record(
@@ -304,6 +318,8 @@ def ingest(
 
         if existing_record and existing_record.get("storage_path"):
             storage_path = existing_record["storage_path"]
+            if reembed:
+                upload_file(storage_path, path, force=True)
         else:
             safe_filename = sanitize_filename(path.name)
             storage_path = f"circulars/{sha256[:12]}_{safe_filename}"

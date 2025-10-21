@@ -71,6 +71,8 @@ class Settings:
     cohere_model: str
     qa_similarity_threshold: float
     qa_max_chunks: int
+    turnstile_secret_key: Optional[str]
+    qa_rate_limit_per_minute: int
 
 
 @lru_cache(maxsize=1)
@@ -110,4 +112,6 @@ def get_settings() -> Settings:
         cohere_model=os.getenv("COHERE_MODEL", "command"),
         qa_similarity_threshold=float(os.getenv("QA_SIMILARITY_THRESHOLD", "0.72")),
         qa_max_chunks=_env_int("QA_MAX_CHUNKS", 6),
+        turnstile_secret_key=_env_optional("TURNSTILE_SECRET_KEY"),
+        qa_rate_limit_per_minute=_env_int("QA_RATE_LIMIT_PER_MINUTE", 60),
     )

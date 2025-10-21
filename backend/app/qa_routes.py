@@ -6,7 +6,8 @@ import time
 from collections import OrderedDict
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import requests
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, constr
 
 from .config import Settings, get_settings
@@ -16,6 +17,7 @@ from .llm_client import LLMClientError, generate_answer
 from .manual_context import match_manual_facts
 from .rag import ChunkHit, embed_text, fetch_relevant_chunks
 from .supabase_client import get_supabase_client
+from .rate_limiter import RateLimiter
 
 
 logger = logging.getLogger(__name__)
@@ -23,12 +25,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/qa", tags=["qa"])
 
+_rate_limiter: RateLimiter | None = None
+
 
 class QARequest(BaseModel):
     question: constr(min_length=5, max_length=2000)  # type: ignore[valid-type]
     grade: str | None = Field(default="Grade 3", max_length=50)
     guardian_name: str | None = Field(default=None, max_length=200)
     guardian_email: str | None = Field(default=None, max_length=200)
+    captcha_token: str | None = Field(default=None, max_length=1024)
 
 
 class SourceInfo(BaseModel):
@@ -66,9 +71,35 @@ def _create_signed_url(client, storage_path: str) -> str | None:
     if not storage_path:
         return None
     bucket = get_settings().storage_bucket
-    result = client.storage.from_(bucket).create_signed_url(storage_path, 3600)
+    try:
+        if not client.storage.from_(bucket).exists(storage_path):
+            logger.warning("Storage object missing for path %s", storage_path)
+            return None
+    except Exception as exc:  # pragma: no cover - storage errors
+        logger.warning("Error checking existence of %s: %s", storage_path, exc)
+        return None
+    try:
+        result = client.storage.from_(bucket).create_signed_url(
+            storage_path, 3600, {"download": True}
+        )
+    except Exception as exc:  # pragma: no cover - network/storage errors
+        logger.warning("Failed to create signed URL for %s: %s", storage_path, exc)
+        return None
+    payload = None
     if isinstance(result, dict):
-        return result.get("signedURL") or result.get("signed_url")
+        payload = result
+    elif hasattr(result, "data"):
+        payload = getattr(result, "data") or {}
+
+    if isinstance(payload, dict):
+        signed = payload.get("signedURL") or payload.get("signed_url")
+        if not signed:
+            return None
+        if signed.startswith("http"):
+            return signed
+        base_url = get_settings().supabase_url.rstrip("/")
+        path = signed if signed.startswith("/") else f"/{signed}"
+        return f"{base_url}{path}"
     return None
 
 
@@ -108,6 +139,27 @@ def _group_sources(client, hits: List[ChunkHit]) -> List[SourceInfo]:
             )
         )
     return sources
+
+
+def _verify_turnstile(token: str, secret: str, remote_ip: str | None) -> bool:
+    payload = {
+        "secret": secret,
+        "response": token,
+    }
+    if remote_ip:
+        payload["remoteip"] = remote_ip
+    try:
+        response = requests.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data=payload,
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return bool(data.get("success"))
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.warning("Turnstile verification error: %s", exc)
+        return False
 
 
 def _build_prompt(question: str, hits: List[ChunkHit], metadata: Dict[str, dict]) -> str:
@@ -225,14 +277,41 @@ def _send_escalation_email(
 @router.post("", response_model=QAResponse)
 def answer_question(
     payload: QARequest,
+    request: Request,
     settings: Settings = Depends(get_settings),
 ) -> QAResponse:
+    global _rate_limiter
     start_time = time.perf_counter()
     client = get_supabase_client(service_role=True)
+
+    if _rate_limiter is None:
+        _rate_limiter = RateLimiter(
+            limit=settings.qa_rate_limit_per_minute,
+            window_seconds=60,
+        )
+
+    requester_ip = request.client.host if request.client else "unknown"
+    if not _rate_limiter.allow(requester_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many questions from this device. Please wait a minute and try again.",
+        )
 
     question = payload.question.strip()
     if not question:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question cannot be empty.")
+
+    if settings.turnstile_secret_key:
+        if not payload.captcha_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification is required before submitting a question.",
+            )
+        if not _verify_turnstile(payload.captcha_token, settings.turnstile_secret_key, requester_ip):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification failed. Please try again.",
+            )
 
     embedding = embed_text(question)
 
