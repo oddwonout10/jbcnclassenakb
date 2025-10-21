@@ -320,6 +320,33 @@ export function AssistantPanel() {
         </p>
       ) : null}
       <div className="mt-2 space-y-4">
+        {isLoading ? (
+          <div
+            className="flex items-center gap-3 rounded-3xl border border-[#b7e6f9] bg-[#f3fbff] p-4 text-sm text-[#1f5670] shadow-inner"
+            aria-live="polite"
+          >
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-2xl shadow">
+              🦉
+            </div>
+            <div className="flex flex-col gap-1">
+              <p className="font-semibold">Checking the latest circulars…</p>
+              <div className="flex items-center gap-1">
+                <span
+                  className="h-2 w-2 rounded-full bg-[#ff6f61] animate-bounce"
+                  style={{ animationDelay: "0ms" }}
+                />
+                <span
+                  className="h-2 w-2 rounded-full bg-[#f9c846] animate-bounce"
+                  style={{ animationDelay: "150ms" }}
+                />
+                <span
+                  className="h-2 w-2 rounded-full bg-[#43c0f6] animate-bounce"
+                  style={{ animationDelay: "300ms" }}
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
         {conversationGroups.map((group, groupIndex) => (
           <div key={`group-${groupIndex}`} className="space-y-3">
             {group.map((turn, turnIndex) => (

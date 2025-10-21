@@ -7,6 +7,7 @@ from .auth_routes import router as auth_router
 from .config import Settings, get_settings
 from .escalation_routes import router as escalation_router
 from .qa_routes import router as qa_router
+from .documents_routes import router as documents_router
 
 app = FastAPI(title="Class Knowledge Base API")
 settings = get_settings()
@@ -20,6 +21,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(escalation_router)
 app.include_router(qa_router)
+app.include_router(documents_router)
 
 
 @app.get("/health")
