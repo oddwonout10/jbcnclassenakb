@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import hashlib
 import json
 import logging
 import re
 import unicodedata
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List
 
-import numpy as np
 import typer
-from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from .config import get_settings
@@ -20,6 +19,20 @@ from .utils.chunks import TextChunk, chunk_text
 from .utils.date_parser import determine_document_date
 from .utils.text_extraction import extract_text
 from .utils.metadata import infer_metadata
+from openai import OpenAI
+
+
+_EMBED_MODEL_NAME = "text-embedding-3-small"
+_EMBED_DIMENSION = 768
+
+
+def _get_openai_client() -> OpenAI:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY must be set to generate embeddings during ingestion."
+        )
+    return OpenAI(api_key=api_key)
 
 
 def load_metadata_overrides() -> dict[str, dict]:
@@ -114,7 +127,7 @@ def insert_document_record(
         response = client.table("documents").insert(payload).execute()
     except Exception as exc:
         message = str(exc)
-        if "duplicate key value" in message:
+        if "duplicate key value" in message or "already exists" in message:
             existing = (
                 client.table("documents")
                 .select("id")
@@ -122,19 +135,26 @@ def insert_document_record(
                 .execute()
             )
             if existing.data:
+                document_id = existing.data[0]["id"]
+                client.table("documents").update(payload).eq("id", document_id).execute()
                 LOGGER.info(
-                    "Document %s already exists with id %s; skipping metadata insert.",
+                    "Updated metadata for existing document %s (id %s).",
                     original_filename,
-                    existing.data[0]["id"],
+                    document_id,
                 )
-                return existing.data[0]["id"]
+                return document_id
         raise
     if not response.data:
         raise RuntimeError(f"Failed to insert document metadata for {original_filename}")
     return response.data[0]["id"]
 
 
-def insert_chunks(document_id: str, published_on: dt.date, chunks: Iterable[TextChunk], embeddings: np.ndarray) -> None:
+def insert_chunks(
+    document_id: str,
+    published_on: dt.date,
+    chunks: Iterable[TextChunk],
+    embeddings: List[List[float]],
+) -> None:
     client = get_supabase_client()
     rows = []
     for chunk, vector in zip(chunks, embeddings):
@@ -144,10 +164,15 @@ def insert_chunks(document_id: str, published_on: dt.date, chunks: Iterable[Text
                 "chunk_index": chunk.index,
                 "content": chunk.content,
                 "published_on": published_on.isoformat(),
-                "embedding": vector.tolist(),
+                "embedding": vector,
             }
         )
     client.table("document_chunks").insert(rows).execute()
+
+
+def purge_document_chunks(document_id: str) -> None:
+    client = get_supabase_client()
+    client.table("document_chunks").delete().eq("document_id", document_id).execute()
 
 
 def ensure_bucket_exists() -> None:
@@ -172,7 +197,12 @@ def ingest(
         "--directory",
         "-d",
         help="Directory containing documents (defaults to INGESTION_SOURCE_DIR).",
-    )
+    ),
+    reembed: bool = typer.Option(
+        False,
+        "--reembed",
+        help="Recompute embeddings and refresh chunks even if the document is already stored.",
+    ),
 ) -> None:
     settings = get_settings()
     source_dir = directory.resolve() if directory else settings.ingestion_source_dir
@@ -197,14 +227,17 @@ def ingest(
         LOGGER.warning("No files found in %s", source_dir)
         return
 
-    model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+    openai_client = _get_openai_client()
     overrides = load_metadata_overrides()
 
     for path in tqdm(files, desc="Ingesting documents"):
         sha256 = compute_sha256(path)
-        if sha256 in existing:
+        existing_record = existing.get(sha256)
+        if existing_record and not reembed:
             LOGGER.info("Skipping %s (already ingested).", path.name)
             continue
+        if existing_record and reembed:
+            LOGGER.info("Reprocessing %s (refreshing embeddings).", path.name)
 
         LOGGER.info("Processing %s", path.name)
         text, page_count = extract_text(path)
@@ -238,6 +271,10 @@ def ingest(
         else:
             grade_tags = ["Grade 3"]
 
+        if doc_type.lower() != "calendar":
+            if "Grade 3" not in grade_tags:
+                grade_tags = sorted({*grade_tags, "Grade 3"})
+
         title = override.get("title", inferred.get("title") or path.stem)
 
         LOGGER.debug(
@@ -258,11 +295,19 @@ def ingest(
             LOGGER.warning("No chunks generated for %s. Skipping.", path)
             continue
 
-        embeddings = model.encode([chunk.content for chunk in chunks])
+        response = openai_client.embeddings.create(
+            model=_EMBED_MODEL_NAME,
+            input=[chunk.content for chunk in chunks],
+            dimensions=_EMBED_DIMENSION,
+        )
+        embeddings = [item.embedding for item in response.data]
 
-        safe_filename = sanitize_filename(path.name)
-        storage_path = f"circulars/{sha256[:12]}_{safe_filename}"
-        upload_file(storage_path, path)
+        if existing_record and existing_record.get("storage_path"):
+            storage_path = existing_record["storage_path"]
+        else:
+            safe_filename = sanitize_filename(path.name)
+            storage_path = f"circulars/{sha256[:12]}_{safe_filename}"
+            upload_file(storage_path, path)
 
         document_id = insert_document_record(
             title=title,
@@ -276,6 +321,9 @@ def ingest(
             event_tags=event_tags,
             grade_tags=grade_tags,
         )
+
+        if existing_record and reembed:
+            purge_document_chunks(document_id)
 
         insert_chunks(document_id, published_on, chunks, embeddings)
         LOGGER.info("Stored %s with %d chunks.", path.name, len(chunks))

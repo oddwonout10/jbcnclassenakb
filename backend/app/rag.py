@@ -127,6 +127,21 @@ def _extract_keywords(question: str, limit: int = 5) -> List[str]:
     return keywords
 
 
+def _keyword_variants(keyword: str) -> List[str]:
+    variants = {keyword}
+    if keyword.endswith("s") and len(keyword) > 3:
+        variants.add(keyword[:-1])
+    if keyword.endswith("es") and len(keyword) > 4:
+        variants.add(keyword[:-2])
+    if keyword.endswith("ed") and len(keyword) > 4:
+        variants.add(keyword[:-2])
+    if keyword.endswith("ing") and len(keyword) > 5:
+        variants.add(keyword[:-3])
+    if len(keyword) >= 7:
+        variants.add(keyword[:5])
+    return [variant for variant in variants if len(variant) >= 3]
+
+
 def parse_date(value) -> dt.date | None:
     if not value:
         return None
@@ -159,7 +174,17 @@ def _keyword_document_matches(
         .contains("grade_tags", [grade_tag])
     )
 
-    or_clauses = ",".join(f"title.ilike.%{kw}%" for kw in keywords)
+    expanded_terms: List[str] = []
+    for kw in keywords:
+        expanded_terms.extend(_keyword_variants(kw))
+    unique_terms = []
+    seen_terms = set()
+    for term in expanded_terms:
+        if term not in seen_terms:
+            unique_terms.append(term)
+            seen_terms.add(term)
+
+    or_clauses = ",".join(f"title.ilike.%{term}%" for term in unique_terms)
     if or_clauses:
         doc_query = doc_query.or_(or_clauses)
 

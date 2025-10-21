@@ -1,7 +1,7 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { QAResponse, SourceInfo } from "@/lib/types";
 
 interface ConversationTurn {
@@ -107,6 +107,29 @@ export function AssistantPanel() {
     }
   }
 
+  const conversationGroups = useMemo(() => {
+    const groups: ConversationTurn[][] = [];
+    let index = conversation.length - 1;
+
+    while (index >= 0) {
+      const current = conversation[index];
+      const previous = conversation[index - 1];
+
+      if (
+        current?.role === "assistant" &&
+        previous?.role === "user"
+      ) {
+        groups.push([previous, current]);
+        index -= 2;
+      } else {
+        groups.push([current]);
+        index -= 1;
+      }
+    }
+
+    return groups;
+  }, [conversation]);
+
   return (
     <section className="flex w-full flex-col gap-4 rounded-xl border border-slate-200 bg-white p-6 shadow-lg shadow-slate-200/40">
       <h2 className="text-xl font-semibold text-slate-900">
@@ -147,25 +170,34 @@ export function AssistantPanel() {
         </div>
       </form>
 
+      {conversation.length > 0 ? (
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
+          Most recent response at the top
+        </p>
+      ) : null}
       <div className="mt-2 space-y-4">
-        {conversation.map((turn, index) => (
-          <div
-            key={index}
-            className={`rounded-lg border p-3 text-sm ${
-              turn.role === "user"
-                ? "border-slate-200 bg-slate-50"
-                : "border-indigo-100 bg-indigo-50"
-            }`}
-          >
-            <p className="font-medium text-slate-600">
-              {turn.role === "user" ? "You" : "Assistant"}
-            </p>
-            <p className="mt-1 whitespace-pre-wrap text-slate-800">
-              {turn.text}
-            </p>
-            {turn.role === "assistant" ? (
-              <SourceList sources={turn.sources ?? []} />
-            ) : null}
+        {conversationGroups.map((group, groupIndex) => (
+          <div key={`group-${groupIndex}`} className="space-y-3">
+            {group.map((turn, turnIndex) => (
+              <div
+                key={`turn-${groupIndex}-${turnIndex}-${turn.role}`}
+                className={`rounded-lg border p-3 text-sm ${
+                  turn.role === "user"
+                    ? "border-slate-200 bg-slate-50"
+                    : "border-indigo-100 bg-indigo-50"
+                }`}
+              >
+                <p className="font-medium text-slate-600">
+                  {turn.role === "user" ? "You" : "Assistant"}
+                </p>
+                <p className="mt-1 whitespace-pre-wrap text-slate-800">
+                  {turn.text}
+                </p>
+                {turn.role === "assistant" ? (
+                  <SourceList sources={turn.sources ?? []} />
+                ) : null}
+              </div>
+            ))}
           </div>
         ))}
       </div>
