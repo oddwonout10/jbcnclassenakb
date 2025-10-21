@@ -25,7 +25,7 @@ export function Header() {
               <span role="img" aria-hidden="true">
                 🌈
               </span>
-              Class companion crafted by Thea's dad, Shreerang Sunkersett
+              Class companion crafted by Thea&apos;s dad, Shreerang Sunkersett
             </p>
           </div>
           <h1 className="text-3xl font-semibold sm:text-4xl lg:text-5xl">
