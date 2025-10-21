@@ -33,7 +33,7 @@ class QARequest(BaseModel):
     grade: str | None = Field(default="Grade 3", max_length=50)
     guardian_name: str | None = Field(default=None, max_length=200)
     guardian_email: str | None = Field(default=None, max_length=200)
-    captcha_token: str | None = Field(default=None, max_length=1024)
+    captcha_token: str | None = Field(default=None, max_length=4096)
 
 
 class SourceInfo(BaseModel):
