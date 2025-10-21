@@ -1,4 +1,3 @@
-/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -176,7 +175,7 @@ export function AssistantPanel() {
       let parsed: QAResponse | { detail?: string } | null = null;
       try {
         parsed = (await response.json()) as QAResponse | { detail?: string };
-      } catch (parseError) {
+      } catch (_error) {
         parsed = null;
       }
 

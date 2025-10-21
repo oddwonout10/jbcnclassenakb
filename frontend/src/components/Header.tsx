@@ -25,7 +25,7 @@ export function Header() {
               <span role="img" aria-hidden="true">
                 🌈
               </span>
-              Class Companion built by Thea's dad, Shreerang Sunkersett
+              Class companion crafted by the dad of Thea, Shreerang Sunkersett
             </p>
           </div>
           <h1 className="text-3xl font-semibold sm:text-4xl lg:text-5xl">
@@ -40,7 +40,7 @@ export function Header() {
             🦉
           </div>
           <p className="text-sm font-medium">
-            “Ask me anything about school life and I’ll find the latest answer for you!”
+            “Ask me anything about school life and I will find the latest answer for you!”
           </p>
         </div>
       </div>
