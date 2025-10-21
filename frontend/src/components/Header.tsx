@@ -32,7 +32,7 @@ export function Header() {
             Hello, Super Learners & Families!
           </h1>
           <p className="max-w-xl text-base sm:text-lg">
-            Explore circulars, discover exciting events, and ask the class owl anything. We keep the latest updates right at your fingertips.
+            Explore circulars i.e. Announcements on Toddle, discover exciting events, and ask the class owl anything. We keep the latest updates right at your fingertips.
           </p>
         </div>
         <div className="flex w-full max-w-sm items-center gap-4 rounded-3xl bg-white/80 p-4 text-[#21576f] shadow-lg backdrop-blur-sm lg:w-auto">

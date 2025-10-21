@@ -25,6 +25,12 @@ export const metadata: Metadata = {
     icon: "/logo.png",
     shortcut: "/logo.png",
     apple: "/logo.png",
+    other: [
+      {
+        rel: "mask-icon",
+        url: "/logo.png",
+      },
+    ],
   },
   openGraph: {
     title: "JBCN Grade 3 Assistant",
@@ -33,7 +39,7 @@ export const metadata: Metadata = {
     siteName: "JBCN Ena Assistant",
     images: [
       {
-        url: "/logo.png",
+        url: "/og-image.png",
         width: 512,
         height: 512,
         alt: "JBCN Ena crest",
@@ -45,7 +51,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "JBCN Grade 3 Assistant",
     description: "Ask questions and review circular updates for Grade 3 Ena.",
-    images: ["/logo.png"],
+    images: ["/og-image.png"],
   },
 };
 

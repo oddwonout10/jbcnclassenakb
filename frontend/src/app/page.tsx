@@ -1,6 +1,7 @@
 import { AssistantPanel } from "@/components/AssistantPanel";
 import { CircularsInfo } from "@/components/CircularsInfo";
 import { UpcomingEvents } from "@/components/UpcomingEvents";
+import { AboutContact } from "@/components/AboutContact";
 
 export default function Home() {
   return (
@@ -57,6 +58,7 @@ export default function Home() {
             <CircularsInfo />
           </div>
         </div>
+        <AboutContact />
       </div>
     </main>
   );
