@@ -140,15 +140,11 @@ export function CircularsInfo() {
                     Published {dateLabel}
                   </p>
                 ) : null}
-                {!item.isTimetable ? (
-                  <p className="mt-2 text-sm text-[#51607c]">
-                    Tap download to open the PDF and review the latest update.
-                  </p>
-                ) : (
+                {item.isTimetable ? (
                   <p className="mt-2 text-sm text-[#51607c]">
                     Keep this handy for quick reference to daily schedules.
                   </p>
-                )}
+                ) : null}
               </article>
             );
           })}

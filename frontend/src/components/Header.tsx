@@ -10,16 +10,16 @@ export function Header() {
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:py-10">
         <div className="space-y-3 text-balance">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 text-xs font-semibold text-[#21576f] shadow-sm">
+            <div className="flex items-center gap-3 rounded-full bg-white/70 px-4 py-2 text-sm font-semibold text-[#21576f] shadow-md">
               <Image
                 src="/logo.png"
                 alt="JBCN Grade 3 Ena crest"
-                width={28}
-                height={28}
-                className="h-7 w-7 rounded-full object-contain shadow-sm"
+                width={40}
+                height={40}
+                className="h-10 w-10 rounded-full object-contain shadow-sm"
                 priority
               />
-              <span>JBCN Grade 3 Ena</span>
+              <span className="text-base font-semibold">JBCN Grade 3 Ena</span>
             </div>
             <p className="inline-flex items-center gap-2 rounded-full bg-white/30 px-4 py-1 text-sm font-semibold text-[#21576f] shadow-sm">
               <span role="img" aria-hidden="true">
