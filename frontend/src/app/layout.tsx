@@ -16,8 +16,37 @@ const friendlyBody = Nunito({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ?? "https://jbcnena.vercel.app"
+  ),
   title: "JBCN Grade 3 Assistant",
   description: "Ask questions and review circular updates for Grade 3 Ena.",
+  icons: {
+    icon: "/logo.png",
+    shortcut: "/logo.png",
+    apple: "/logo.png",
+  },
+  openGraph: {
+    title: "JBCN Grade 3 Assistant",
+    description: "Ask questions and review circular updates for Grade 3 Ena.",
+    url: "/",
+    siteName: "JBCN Ena Assistant",
+    images: [
+      {
+        url: "/logo.png",
+        width: 512,
+        height: 512,
+        alt: "JBCN Ena crest",
+      },
+    ],
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "JBCN Grade 3 Assistant",
+    description: "Ask questions and review circular updates for Grade 3 Ena.",
+    images: ["/logo.png"],
+  },
 };
 
 export default function RootLayout({
