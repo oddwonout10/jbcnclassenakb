@@ -15,7 +15,7 @@ from .email import send_email
 from .calendar_events import fetch_calendar_context
 from .llm_client import LLMClientError, generate_answer
 from .manual_context import match_manual_facts
-from .rag import ChunkHit, embed_text, fetch_relevant_chunks
+from .rag import ChunkHit, embed_text, fetch_relevant_chunks, parse_date as rag_parse_date
 from .supabase_client import get_supabase_client
 from .rate_limiter import RateLimiter
 from .temporal_context import (
@@ -129,6 +129,46 @@ def _fetch_document_metadata(client, document_ids: List[str]) -> Dict[str, dict]
     for row in response.data or []:
         metadata[row["id"]] = row
     return metadata
+
+
+def _fetch_keyword_hits(client, question: str, limit: int) -> List[ChunkHit]:
+    try:
+        response = client.rpc(
+            "match_document_chunks_fuzzy",
+            {"q": question, "limit_count": limit},
+        ).execute()
+    except Exception as exc:  # pragma: no cover - Supabase RPC failure
+        logger.warning("Keyword search RPC failed: %s", exc)
+        return []
+
+    rows = response.data or []
+    hits: List[ChunkHit] = []
+    for row in rows:
+        document_id = row.get("document_id")
+        if not document_id:
+            continue
+        chunk_index = row.get("chunk_index") or 0
+        content = row.get("content") or ""
+        similarity_raw = row.get("similarity")
+        try:
+            similarity = float(similarity_raw)
+        except (TypeError, ValueError):
+            similarity = 0.0
+        published_on = rag_parse_date(row.get("published_on"))
+        hits.append(
+            ChunkHit(
+                document_id=document_id,
+                chunk_index=chunk_index,
+                content=content,
+                similarity=similarity,
+                document_title=row.get("document_title") or row.get("title") or "Untitled",
+                original_filename=row.get("original_filename") or "",
+                published_on=published_on,
+                storage_path=row.get("storage_path") or "",
+                score=similarity,
+            )
+        )
+    return hits
 
 
 def _group_sources(client, hits: List[ChunkHit]) -> List[SourceInfo]:
@@ -549,6 +589,24 @@ def answer_question(
         )
         _send_escalation_email(settings, payload, "Knowledge base unreachable (network/Supabase error).")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Knowledge base temporarily unavailable") from exc
+
+    keyword_hits = _fetch_keyword_hits(client, question, settings.qa_max_chunks)
+    if keyword_hits:
+        keyed_hits: Dict[tuple[str, int], ChunkHit] = {
+            (hit.document_id, hit.chunk_index): hit for hit in hits
+        }
+        for keyword_hit in keyword_hits:
+            key = (keyword_hit.document_id, keyword_hit.chunk_index)
+            existing = keyed_hits.get(key)
+            if existing:
+                if keyword_hit.similarity > existing.similarity:
+                    existing.similarity = keyword_hit.similarity
+                existing.score = max(existing.score, keyword_hit.score, keyword_hit.similarity)
+                if len(keyword_hit.content) > len(existing.content):
+                    existing.content = keyword_hit.content
+            else:
+                hits.append(keyword_hit)
+                keyed_hits[key] = keyword_hit
 
     for entry in calendar_matches or []:
         doc_id = f"calendar:{entry['title'].lower().replace(' ', '-')[:40]}"
