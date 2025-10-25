@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import time
 from collections import OrderedDict
 from typing import Dict, List, Optional
@@ -65,6 +66,42 @@ class QAResponse(BaseModel):
     sources: List[SourceInfo]
 
 
+SCHEDULE_TERMS = {
+    "uniform",
+    "wear",
+    "kit",
+    "attire",
+    "pickup",
+    "dispersal",
+    "dismissal",
+    "bagless",
+}
+
+CONTACT_KEYWORDS = {
+    "contact",
+    "call",
+    "phone",
+    "reach",
+    "email",
+    "whatsapp",
+}
+
+CONTACT_ROLE_HINTS = {
+    "transport": {"transport", "bus", "pickup", "drop"},
+    "cafeteria": {"cafeteria", "canteen", "meal"},
+    "academics": {"homework", "curriculum", "teacher"},
+    "admin": {"fees", "payment", "accounts"},
+}
+
+QUICK_LINK_KEYWORD_MAP = {
+    "cafeteria_menu": {"cafeteria", "canteen", "menu"},
+    "bus_routes": {"bus", "transport"},
+}
+
+DATE_REGEX = re.compile(r"\b(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+|\d{4}-\d{2}-\d{2})\b")
+TIME_REGEX = re.compile(r"\b\d{1,2}(:\d{2})?\s?(?:am|pm|hrs)\b", re.IGNORECASE)
+
+
 def _format_sources_section(sources: List[SourceInfo]) -> str:
     if not sources:
         return ""
@@ -114,6 +151,29 @@ def _create_signed_url(client, storage_path: str) -> str | None:
         path = signed if signed.startswith("/") else f"/{signed}"
         return f"{base_url}{path}"
     return None
+
+
+def _collect_schedule_terms(question: str) -> List[str]:
+    lowered = question.lower()
+    return [term for term in SCHEDULE_TERMS if term in lowered]
+
+
+def _infer_contact_role(lowered: str) -> Optional[str]:
+    for role, keywords in CONTACT_ROLE_HINTS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return role
+    return None
+
+
+def _detect_quick_link_type(lowered: str) -> Optional[str]:
+    for link_type, keywords in QUICK_LINK_KEYWORD_MAP.items():
+        if any(keyword in lowered for keyword in keywords):
+            return link_type
+    return None
+
+
+def _answer_contains_explicit_date(text: str) -> bool:
+    return bool(DATE_REGEX.search(text) or TIME_REGEX.search(text))
 
 
 def _fetch_document_metadata(client, document_ids: List[str]) -> Dict[str, dict]:
@@ -698,6 +758,24 @@ def answer_question(
         )
 
     if not hits:
+        doc_suggestions = _fetch_document_fuzzy(client, question, limit=3)
+        if doc_suggestions:
+            best = doc_suggestions[0]
+            answer_text = (
+                f"I couldn’t find a direct answer, but this circular might help: {best.title}."
+            )
+            _log_interaction(
+                client=client,
+                question=question,
+                answer=answer_text,
+                status_label="suggested",
+                sources=doc_suggestions,
+                similarity=None,
+                latency_ms=int((time.perf_counter() - start_time) * 1000),
+                model_name="fuzzy-doc-suggestion",
+            )
+            return QAResponse(status="suggested", answer=answer_text, sources=doc_suggestions)
+
         answer_text = (
             "I could not find this information in the current circulars. "
             "Your question has been escalated to the class parent."

@@ -68,9 +68,9 @@ export function AssistantPanel() {
   const widgetIdRef = useRef<string | null>(null);
 
   const suggestions = [
-    "When is the next school break?",
-    "What should I bring for the field trip?",
-    "Which clubs are happening this month?",
+    "When is Diwali vacation?",
+    "When is Nashik trip?",
+    "Who is on the PTA?",
   ];
 
   useEffect(() => {
