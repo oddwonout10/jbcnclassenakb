@@ -171,6 +171,36 @@ def _fetch_keyword_hits(client, question: str, limit: int) -> List[ChunkHit]:
     return hits
 
 
+def _fetch_document_fuzzy(client, question: str, limit: int) -> List[SourceInfo]:
+    try:
+        response = client.rpc(
+            "match_documents_fuzzy",
+            {"q": question, "limit_count": limit},
+        ).execute()
+    except Exception as exc:  # pragma: no cover - Supabase RPC failure
+        logger.warning("Document search RPC failed: %s", exc)
+        return []
+
+    sources: List[SourceInfo] = []
+    for row in response.data or []:
+        doc_id = row.get("id")
+        if not doc_id:
+            continue
+        storage_path = row.get("storage_path") or ""
+        sources.append(
+            SourceInfo(
+                document_id=doc_id,
+                title=row.get("title") or "Untitled document",
+                published_on=row.get("published_on"),
+                original_filename=row.get("original_filename") or "",
+                signed_url=_create_signed_url(client, storage_path),
+                storage_path=storage_path,
+                similarity=float(row.get("similarity") or 0.0),
+            )
+        )
+    return sources
+
+
 def _group_sources(client, hits: List[ChunkHit]) -> List[SourceInfo]:
     seen: OrderedDict[str, ChunkHit] = OrderedDict()
     for hit in hits:

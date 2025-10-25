@@ -44,3 +44,106 @@ $$;
 
 grant execute on function public.match_document_chunks(vector(768), double precision, integer, text)
   to authenticated, service_role, anon;
+
+-------------------------------------------------------------------------------
+-- Typo tolerant fuzzy search helpers (pg_trgm + full-text search)
+-------------------------------------------------------------------------------
+
+create or replace function public.match_document_chunks_fuzzy(
+  q text,
+  limit_count int default 20
+) returns table (
+  document_id uuid,
+  chunk_index int,
+  content text,
+  similarity real,
+  published_on date,
+  document_title text,
+  original_filename text,
+  storage_path text
+)
+language sql stable as $$
+  select
+    dc.document_id,
+    dc.chunk_index,
+    dc.content,
+    greatest(
+      word_similarity(q, dc.content),
+      similarity(dc.content, q),
+      word_similarity(q, d.title)
+    ) as similarity,
+    dc.published_on,
+    d.title as document_title,
+    d.original_filename,
+    d.storage_path
+  from public.document_chunks dc
+  join public.documents d on d.id = dc.document_id
+  where to_tsvector('english', dc.content) @@ plainto_tsquery('english', q)
+     or dc.content % q
+  order by similarity desc, dc.published_on desc
+  limit limit_count;
+$$;
+
+create or replace function public.match_documents_fuzzy(
+  q text,
+  limit_count int default 20
+) returns table (
+  id uuid,
+  title text,
+  similarity real,
+  published_on date,
+  original_filename text,
+  storage_path text
+)
+language sql stable as $$
+  select
+    d.id,
+    d.title,
+    greatest(
+      word_similarity(q, d.title),
+      similarity(d.title, q)
+    ) as similarity,
+    d.published_on,
+    d.original_filename,
+    d.storage_path
+  from public.documents d
+  where to_tsvector('english', d.title) @@ plainto_tsquery('english', q)
+     or d.title % q
+  order by similarity desc, d.published_on desc
+  limit limit_count;
+$$;
+
+create or replace function public.match_calendar_events_fuzzy(
+  q text,
+  limit_count int default 20
+) returns table (
+  id text,
+  title text,
+  event_date date,
+  end_date date,
+  audience text[],
+  description text,
+  source text,
+  similarity real
+)
+language sql stable as $$
+  select
+    ce.id::text,
+    ce.title,
+    ce.event_date,
+    ce.end_date,
+    ce.audience,
+    ce.description,
+    ce.source,
+    greatest(
+      word_similarity(q, ce.title),
+      similarity(ce.title, q),
+      word_similarity(q, coalesce(ce.description, ''))
+    ) as similarity
+  from public.calendar_events ce
+  where to_tsvector('english', ce.title) @@ plainto_tsquery('english', q)
+     or ce.title % q
+     or (coalesce(ce.description, '') % q)
+  order by similarity desc, coalesce(ce.event_date, now()) desc
+  limit limit_count;
+$$;
