@@ -109,10 +109,10 @@ def fetch_calendar_context(client, question: str, grade: str | None = None) -> L
                 record["end_date"] = candidate_end_value
             record["audience"].update(row.get("audience") or [])
 
-    audience_whitelist = {"whole_school", "general"}
+    audience_whitelist = {"whole_school", "whole_school_holiday", "general"}
     grade_lower = (grade or "").lower()
     if "primary" in grade_lower or "grade 3" in grade_lower:
-        audience_whitelist.update({"primary"})
+        audience_whitelist.update({"primary", "primary_secondary"})
 
     summaries: List[dict] = []
     for record in results.values():

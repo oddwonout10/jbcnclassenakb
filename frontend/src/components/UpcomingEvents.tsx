@@ -37,13 +37,44 @@ export function UpcomingEvents() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  const allowedAudience = new Set<string>([
+    "whole_school",
+    "whole_school_holiday",
+    "primary",
+    "primary_secondary",
+    "general",
+  ]);
+  const audiencePriority: Record<string, number> = {
+    primary: 0,
+    primary_secondary: 1,
+    whole_school: 2,
+    whole_school_holiday: 3,
+    general: 4,
+    secondary: 5,
+    pre_primary: 6,
+  };
+
+  function scoreEventAudience(audience: string[] | null | undefined): number {
+    if (!audience || audience.length === 0) {
+      return audiencePriority.general;
+    }
+    let best = audiencePriority.general;
+    for (const entry of audience) {
+      const normalized = entry.toLowerCase();
+      if (normalized in audiencePriority) {
+        best = Math.min(best, audiencePriority[normalized]);
+      }
+    }
+    return best;
+  }
+
   useEffect(() => {
     async function loadEvents() {
       if (!supabase) return;
       const today = new Date().toISOString().split("T")[0];
       const { data, error: fetchError } = await supabase
         .from("calendar_events")
-        .select("*")
+        .select("id,title,event_date,end_date,audience,description,source")
         .gte("event_date", today)
         .order("event_date", { ascending: true })
         .limit(40);
@@ -53,21 +84,44 @@ export function UpcomingEvents() {
         return;
       }
 
-      const grouped = new Map<string, CalendarEvent[]>();
-      (data ?? []).forEach((event) => {
-        if (!grouped.has(event.event_date)) {
-          grouped.set(event.event_date, []);
+      const relevant = (data ?? []).filter((event) => {
+        const rawAudience = Array.isArray(event.audience)
+          ? event.audience
+          : [];
+        const tags = rawAudience;
+        if (tags.length === 0) {
+          return true;
         }
-        grouped.get(event.event_date)!.push(event);
+        return tags.some((entry: string) => {
+          const normalized = entry.toLowerCase();
+          return allowedAudience.has(normalized);
+        });
       });
 
-      const orderedDates = Array.from(grouped.keys()).sort();
+      const grouped = new Map<string, CalendarEvent[]>();
+      relevant.forEach((event) => {
+        const key = `${event.event_date}:${event.title.toLowerCase()}`;
+        if (!grouped.has(key)) {
+          grouped.set(key, []);
+        }
+        grouped.get(key)!.push(event);
+      });
+
+      const orderedKeys = Array.from(grouped.keys()).sort((a, b) => {
+        const [dateA] = a.split(":");
+        const [dateB] = b.split(":");
+        return dateA.localeCompare(dateB);
+      });
       const MAX_ITEMS = 6;
       const selected: CalendarEvent[] = [];
-      for (const date of orderedDates) {
-        const dayEvents = grouped.get(date);
+      for (const key of orderedKeys) {
+        const dayEvents = grouped.get(key);
         if (!dayEvents) continue;
-        selected.push(...dayEvents);
+        const sorted = [...dayEvents].sort((a, b) => {
+          return scoreEventAudience(a.audience) - scoreEventAudience(b.audience);
+        });
+        const primaryEvent = sorted[0];
+        selected.push(primaryEvent);
         if (selected.length >= MAX_ITEMS) {
           break;
         }
@@ -106,21 +160,28 @@ export function UpcomingEvents() {
             event.event_date,
             event.end_date ?? null
           );
-          const tag =
-            event.audience?.length && event.audience[0]
-              ? event.audience[0]
-              : "general";
+          const audiences = Array.isArray(event.audience)
+            ? event.audience
+            : [];
+          const tagRaw =
+            audiences.find((entry) =>
+              allowedAudience.has(entry.toLowerCase())
+            ) ?? "general";
+          const tag = tagRaw.toLowerCase();
 
           const badgeMap: Record<string, string> = {
             whole_school: "bg-[#ff6f61]/20 text-[#c74335]",
+            whole_school_holiday: "bg-[#f9c846]/25 text-[#a46b00]",
             holiday: "bg-[#f9c846]/25 text-[#a46b00]",
             primary: "bg-[#43c0f6]/20 text-[#1f5670]",
             secondary: "bg-[#4cc6a8]/25 text-[#256e5c]",
             primary_secondary: "bg-[#b387fa]/20 text-[#6048a5]",
+            pre_primary: "bg-[#9fd5ff]/30 text-[#27638f]",
             general: "bg-[#cde6ff]/40 text-[#2f3142]",
           };
 
           const badgeStyle = badgeMap[tag] ?? badgeMap.general;
+          const tagLabel = tag.replaceAll("_", " ");
 
           return (
             <article
@@ -130,11 +191,18 @@ export function UpcomingEvents() {
               <span
                 className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold capitalize ${badgeStyle}`}
               >
-                {tag.replaceAll("_", " ")}
+                {tagLabel}
               </span>
               <p className="mt-2 text-base font-semibold text-[#2f3142]">
                 {event.title}
               </p>
+              {event.description &&
+              event.description.trim().toLowerCase() !==
+                event.title.trim().toLowerCase() ? (
+                <p className="mt-1 text-sm text-[#51607c]">
+                  {event.description}
+                </p>
+              ) : null}
               <p className="text-xs font-medium text-[#4e5d78]">
                 {dateRange}
               </p>

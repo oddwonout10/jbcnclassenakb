@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Set
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -18,6 +18,64 @@ HOLIDAY_KEYWORDS = {
 }
 
 TITLE_NORMALISE_REGEX = re.compile(r"\b(begins?|starts?|ends?|finishes|reopens|resume?s)\b", re.IGNORECASE)
+
+PRE_PRIMARY_TOKENS = {
+    "pre-primary",
+    "pre primary",
+    "jr kg",
+    "junior kg",
+    "sr kg",
+    "senior kg",
+    "kg",
+    "kindergarten",
+    "nursery",
+}
+
+SECONDARY_TOKENS = {
+    "secondary",
+    "grade 6",
+    "grade 7",
+    "grade 8",
+    "grade 9",
+    "grade 10",
+    "grade 11",
+    "grade 12",
+}
+
+
+def _normalise_grade_band(grade: Optional[str]) -> str:
+    if not grade:
+        return "primary"
+    lowered = grade.lower()
+    if any(token in lowered for token in PRE_PRIMARY_TOKENS):
+        return "pre_primary"
+    if any(token in lowered for token in SECONDARY_TOKENS):
+        return "secondary"
+    if "primary" in lowered:
+        return "primary"
+    if re.search(r"\bgrade\s*[1-5]\b", lowered):
+        return "primary"
+    return "primary"
+
+
+def _allowed_audience_for_grade(grade: Optional[str]) -> Set[str]:
+    band = _normalise_grade_band(grade)
+    allowed: Set[str] = {"general", "whole_school", "whole_school_holiday"}
+    if band == "pre_primary":
+        allowed.update({"pre_primary"})
+    elif band == "secondary":
+        allowed.update({"secondary", "primary_secondary"})
+    else:
+        allowed.update({"primary", "primary_secondary"})
+    return allowed
+
+
+def audience_applies_to_grade(audience: Iterable[str], grade: Optional[str]) -> bool:
+    audience_set = {entry.lower() for entry in audience if entry}
+    if not audience_set:
+        return True
+    allowed = _allowed_audience_for_grade(grade)
+    return bool(audience_set & allowed)
 
 
 def normalise_event_title(title: str) -> str:
@@ -87,7 +145,7 @@ def infer_date_references(question: str, now: dt.datetime) -> list[DateReference
 
     # Attempt to parse explicit dates like "14 November" or "14 Nov 2025"
     date_pattern = re.compile(
-        r"\b(?P<day>\d{1,2})\s+(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(?P<year>\d{2,4}))?\b",
+        r"\b(?P<day>\d{1,2})(?:st|nd|rd|th)?\s+(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(?P<year>\d{2,4}))?\b",
         re.IGNORECASE,
     )
     for match in date_pattern.finditer(q):
@@ -207,7 +265,12 @@ def infer_date_references(question: str, now: dt.datetime) -> list[DateReference
     return references
 
 
-def fetch_calendar_events_for_window(client, center: dt.date, window_days: int = 7) -> list[dict]:
+def fetch_calendar_events_for_window(
+    client,
+    center: dt.date,
+    window_days: int = 7,
+    grade: Optional[str] = None,
+) -> list[dict]:
     start = (center - dt.timedelta(days=window_days)).isoformat()
     end = (center + dt.timedelta(days=window_days)).isoformat()
     response = (
@@ -218,7 +281,18 @@ def fetch_calendar_events_for_window(client, center: dt.date, window_days: int =
         .order("event_date")
         .execute()
     )
-    return response.data or []
+    rows = response.data or []
+    if not rows:
+        return []
+
+    allowed = _allowed_audience_for_grade(grade)
+    filtered: list[dict] = []
+    for row in rows:
+        audience = {entry.lower() for entry in row.get("audience") or [] if entry}
+        if audience and not (audience & allowed):
+            continue
+        filtered.append(row)
+    return filtered
 
 
 def parse_date(value: Optional[str]) -> Optional[dt.date]:
@@ -395,7 +469,10 @@ def determine_holiday_answer(
 
 
 def upcoming_holiday_event(
-    client, after_date: dt.date, lookahead_days: int = 180
+    client,
+    after_date: dt.date,
+    lookahead_days: int = 180,
+    grade: Optional[str] = None,
 ) -> dict[str, Optional[dict]]:
     window_end = (after_date + dt.timedelta(days=lookahead_days)).isoformat()
     response = (
@@ -408,7 +485,13 @@ def upcoming_holiday_event(
     )
     rows = response.data or []
     aggregated: dict[str, dict] = {}
+    allowed = _allowed_audience_for_grade(grade)
+
     for row in rows:
+        audience = {entry.lower() for entry in row.get("audience") or [] if entry}
+        if audience and not (audience & allowed):
+            continue
+
         summary_text = (row.get("description") or "").lower()
         if not any(keyword in summary_text for keyword in HOLIDAY_KEYWORDS):
             title_lower = (row.get("title") or "").lower()

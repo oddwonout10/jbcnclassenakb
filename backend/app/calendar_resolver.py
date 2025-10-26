@@ -8,6 +8,8 @@ from typing import Iterable, List, Optional, Sequence
 from rapidfuzz import fuzz
 
 from .temporal_context import (
+    prettify_event_title,
+    audience_applies_to_grade,
     format_date,
     infer_date_references,
     normalise_event_title,
@@ -31,6 +33,11 @@ GENERIC_WORDS = {
     "of",
     "to",
     "in",
+    "tell",
+    "me",
+    "about",
+    "please",
+    "share",
     "next",
     "last",
     "previous",
@@ -262,11 +269,53 @@ def _filter_by_keywords(events: Iterable[CalendarEventRecord], keywords: Sequenc
     return filtered or list(events)
 
 
+def _event_contains_keyword(event: CalendarEventRecord, keyword: str) -> bool:
+    haystack = f"{event.normalized_title} {event.description_lower}"
+    return keyword in haystack
+
+
+def _aggregate_events(events: Sequence[CalendarEventRecord]) -> List[CalendarEventRecord]:
+    buckets: dict[str, CalendarEventRecord] = {}
+    for event in events:
+        key = event.normalized_title
+        existing = buckets.get(key)
+        if not existing:
+            buckets[key] = CalendarEventRecord(
+                id=f"agg:{key or event.id}",
+                title=prettify_event_title(event.title),
+                normalized_title=key,
+                description=event.description,
+                description_lower=event.description_lower,
+                start=event.start,
+                end=event.end,
+                audience=event.audience,
+                source=event.source,
+            )
+            continue
+
+        if event.start < existing.start:
+            existing.start = event.start
+        if event.end > existing.end:
+            existing.end = event.end
+
+        combined_audience = {*(existing.audience or ()), *(event.audience or ())}
+        existing.audience = tuple(sorted(combined_audience))
+
+        if len(event.description) > len(existing.description):
+            existing.description = event.description
+            existing.description_lower = event.description_lower
+        if not existing.source and event.source:
+            existing.source = event.source
+
+    return list(buckets.values())
+
+
 def resolve_calendar_question(
     *,
     client,
     question: str,
     reference_date: dt.date,
+    grade: Optional[str] = None,
 ) -> Optional[CalendarAnswer]:
     question_lower = question.lower()
     tokens = _tokenize(question_lower)
@@ -284,30 +333,59 @@ def resolve_calendar_question(
     if not events:
         return None
 
+    events = [event for event in events if audience_applies_to_grade(event.audience, grade)]
+    if not events:
+        return None
+
+    aggregated_events = _aggregate_events(events)
+
     date_refs = infer_date_references(question, dt.datetime.combine(reference_date, dt.time()))
     explicit_dates = [ref.target_date for ref in date_refs if ref.target_date]
 
-    if explicit_dates and not keywords:
-        target_date = explicit_dates[0]
-        for event in events:
-            if event.start <= target_date <= event.end:
-                return CalendarAnswer(
-                    event_id=event.id,
-                    title=event.title,
-                    start=event.start,
-                    end=event.end,
-                    description=event.description,
-                    audience=event.audience,
-                    source=event.source,
-                    mode="date_lookup",
-                    score=1.0,
-                )
+    if explicit_dates:
+        for target_date in explicit_dates:
+            for event in events:
+                if event.start <= target_date <= event.end:
+                    return CalendarAnswer(
+                        event_id=event.id,
+                        title=event.title,
+                        start=event.start,
+                        end=event.end,
+                        description=event.description,
+                        audience=event.audience,
+                        source=event.source,
+                        mode="date_lookup",
+                        score=1.0,
+                    )
+            for agg_event in aggregated_events:
+                if agg_event.start <= target_date <= agg_event.end:
+                    if agg_event.duration_days <= 1:
+                        continue
+                    return CalendarAnswer(
+                        event_id=agg_event.id,
+                        title=agg_event.title,
+                        start=agg_event.start,
+                        end=agg_event.end,
+                        description=agg_event.description,
+                        audience=agg_event.audience,
+                        source=agg_event.source,
+                        mode="date_lookup",
+                        score=0.9,
+                    )
 
     canonical_keywords = keywords.copy()
     if not canonical_keywords and "break" in question_lower:
         canonical_keywords = ["break"]
     if not canonical_keywords and "holiday" in question_lower:
         canonical_keywords = ["break"]
+
+    if (
+        "break" not in canonical_keywords
+        and any(trigger in question_lower for trigger in ("break", "holiday", "vacation", "holidays", "vacations"))
+    ):
+        canonical_keywords.append("break")
+
+    required_keywords = [keyword for keyword in canonical_keywords if keyword not in {"break"}]
 
     def _format_result(event: CalendarEventRecord, score: float, detected_mode: str) -> CalendarAnswer:
         description = event.description
@@ -356,39 +434,63 @@ def resolve_calendar_question(
                 best_event = event
                 best_score = score
         if best_event and best_score >= 45:
-            return _format_result(best_event, best_score, "specific")
+            if required_keywords and not any(_event_contains_keyword(best_event, kw) for kw in required_keywords):
+                best_event = None
+            else:
+                return _format_result(best_event, best_score, "specific")
+
+        if required_keywords:
+            for agg_event in aggregated_events:
+                if agg_event.duration_days <= 1:
+                    continue
+                if not any(_event_contains_keyword(agg_event, kw) for kw in required_keywords):
+                    continue
+                return _format_result(agg_event, 55.0, "specific")
 
         try:
             response = client.rpc(
                 "match_calendar_events_fuzzy",
-                {"q": " ".join(canonical_keywords), "limit_count": 1},
+                {"q": " ".join(canonical_keywords), "limit_count": 5},
             ).execute()
         except Exception:
             response = None
         if response and response.data:
-            row = response.data[0]
-            start_raw = row.get("event_date")
-            end_raw = row.get("end_date") or start_raw
-            try:
-                start_date = dt.date.fromisoformat(start_raw) if start_raw else None
-            except Exception:
-                start_date = None
-            try:
-                end_date = dt.date.fromisoformat(end_raw) if end_raw else start_date
-            except Exception:
-                end_date = start_date
-            if start_date:
-                return CalendarAnswer(
-                    event_id=row.get("id") or row.get("title") or "calendar",
-                    title=row.get("title") or "Calendar event",
-                    start=start_date,
-                    end=end_date or start_date,
-                    description=(row.get("description") or "").strip(),
-                    audience=tuple(row.get("audience") or []),
-                    source=row.get("source"),
-                    mode="specific",
-                    score=float(row.get("similarity") or 0.0),
-                )
+            for row in response.data:
+                audience = tuple(row.get("audience") or [])
+                if not audience_applies_to_grade(audience, grade):
+                    continue
+                haystack = f"{normalise_event_title(row.get('title') or '')} {(row.get('description') or '').lower()}"
+                if required_keywords and not any(keyword in haystack for keyword in required_keywords):
+                    continue
+                start_raw = row.get("event_date")
+                end_raw = row.get("end_date") or start_raw
+                try:
+                    start_date = dt.date.fromisoformat(start_raw) if start_raw else None
+                except Exception:
+                    start_date = None
+                try:
+                    end_date = dt.date.fromisoformat(end_raw) if end_raw else start_date
+                except Exception:
+                    end_date = start_date
+                similarity_raw = row.get("similarity")
+                try:
+                    similarity = float(similarity_raw)
+                except (TypeError, ValueError):
+                    similarity = 0.0
+                if required_keywords and similarity < 0.3:
+                    continue
+                if start_date:
+                    return CalendarAnswer(
+                        event_id=row.get("id") or row.get("title") or "calendar",
+                        title=row.get("title") or "Calendar event",
+                        start=start_date,
+                        end=end_date or start_date,
+                        description=(row.get("description") or "").strip(),
+                        audience=audience,
+                        source=row.get("source"),
+                        mode="specific",
+                        score=similarity,
+                    )
 
     if explicit_dates:
         target_date = explicit_dates[0]

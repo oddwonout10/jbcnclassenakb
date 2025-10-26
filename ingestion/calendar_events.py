@@ -46,7 +46,7 @@ COLOR_VARIANTS = {
     "primary_secondary": [(0.839, 0.0, 0.576), (0.6, 0.0, 1.0)],
 }
 COLOR_LABELS = {
-    "pre_primary": "pre-primary",
+    "pre_primary": "pre_primary",
     "primary": "primary",
     "secondary": "secondary",
     "primary_secondary": "primary_secondary",
@@ -78,7 +78,11 @@ class CalendarParseError(RuntimeError):
 
 
 def _normalise_color(color: Optional[tuple]) -> Optional[tuple[float, float, float]]:
-    if not color or len(color) < 3:
+    if color is None:
+        return None
+    if isinstance(color, (int, float)):
+        return (round(float(color), 3),) * 3
+    if len(color) < 3:
         return None
     return tuple(round(component, 3) for component in color[:3])
 
@@ -195,8 +199,37 @@ def _format_audience_suffix(audience: List[str]) -> str:
     return " (" + " & ".join(labels) + ")"
 
 
+def _audience_from_labels(labels: Iterable[str]) -> List[str]:
+    audience_tags: set[str] = set()
+    for label in labels:
+        label = label.replace("-", "_") if label else label
+        if label == "whole_school_holiday":
+            audience_tags.update({"whole_school", "holiday"})
+        elif label == "primary_secondary":
+            audience_tags.update({"primary", "secondary"})
+        elif label:
+            audience_tags.add(label)
+    return sorted(audience_tags) if audience_tags else ["general"]
+
+
+def _find_cell_color(rects, left: float, right: float, top: float, bottom: float) -> Optional[str]:
+    for rect in rects:
+        fill = rect.get("non_stroking_color")
+        if not fill:
+            continue
+        rgb = _normalise_color(fill)
+        if not rgb:
+            continue
+        if rect["x0"] <= right and rect["x1"] >= left and rect["top"] <= bottom and rect["bottom"] >= top:
+            label = _classify_color(rgb)
+            if label:
+                return label
+    return None
+
+
 def _parse_page(page, *, source_name: str) -> List[dict]:
     words = page.extract_words(extra_attrs=["non_stroking_color"])
+    rects = page.rects
 
     month_name: Optional[str] = None
     year_value: Optional[int] = None
@@ -266,129 +299,48 @@ def _parse_page(page, *, source_name: str) -> List[dict]:
             segments: List[tuple[str, List[str]]] = []
             current_label: Optional[str] = None
             current_tokens: List[str] = []
+            cell_left = column_bounds[column_index]
+            cell_right = column_bounds[column_index + 1]
+            cell_top = row["top"]
+            cell_bottom = row["bottom"]
+            cell_label = _find_cell_color(rects, cell_left, cell_right, cell_top, cell_bottom)
+
+            line_clusters: dict[float, List[dict]] = {}
             for entry in words_in_cell:
                 text = entry["text"]
-                color_length = len(entry.get("non_stroking_color", ()))
-                if (
-                    text.isdigit()
-                    and int(text) == day
-                    and color_length == 1
-                    and entry["top"] < row["center"] + 2
-                ):
+                if text.isdigit() and int(text) == day:
+                    continue
+                key = round(entry["top"], 1)
+                line_clusters.setdefault(key, []).append(entry)
+
+            for key in sorted(line_clusters):
+                entries = sorted(line_clusters[key], key=lambda item: (item["top"], item["x0"]))
+                tokens = [e["text"] for e in entries]
+                content = _clean_text(tokens)
+                if not content or _should_skip(content):
                     continue
 
-                text_parts.append(text)
-                category = _classify_color(entry.get("non_stroking_color"))
-                if category:
-                    audience_counts[category] += 1
-                assigned_label = category or current_label or "general"
-                if assigned_label != current_label:
-                    if current_tokens:
-                        segments.append((current_label or "general", current_tokens))
-                        current_tokens = []
-                    current_label = assigned_label
-                current_tokens.append(text)
+                labels = []
+                for entry in entries:
+                    label = _classify_color(entry.get("non_stroking_color"))
+                    if label:
+                        labels.append(label)
 
-            if current_tokens:
-                segments.append((current_label or "general", current_tokens))
+                if not labels and cell_label:
+                    labels.append(cell_label)
 
-            content = _clean_text(text_parts)
-            if not content or _should_skip(content):
-                continue
-
-            built_segments: List[tuple[str, str]] = []
-            for label, tokens in segments:
-                cleaned_segment = _clean_text(tokens)
-                if not cleaned_segment or _should_skip(cleaned_segment):
-                    continue
-                built_segments.append((label, cleaned_segment))
-
-            if built_segments:
-                refined_segments: List[tuple[str, str]] = []
-                for label, segment_text in built_segments:
-                    text_lower = segment_text.lower()
-                    if (
-                        label in {"primary_secondary", "primary"}
-                        and "election day" in text_lower
-                        and "result of the election" in text_lower
-                    ):
-                        refined_segments.append((label, "Election Day"))
-                        refined_segments.append((label, "Result of the Election"))
-                    else:
-                        refined_segments.append((label, segment_text))
-                built_segments = refined_segments
-
-            if len(built_segments) > 1:
-                for label, segment_text in built_segments:
-                    if label == "whole_school_holiday":
-                        audience_list = ["whole_school", "holiday"]
-                    elif label == "primary_secondary":
-                        audience_list = ["primary", "secondary"]
-                    else:
-                        audience_list = [label]
-
-                    event_date = dt.date(year_value, month_number, day)
-                    title_with_suffix = segment_text + _format_audience_suffix(audience_list)
-                    events.append(
-                        {
-                            "event_date": event_date,
-                            "title": title_with_suffix,
-                            "description": segment_text,
-                            "audience": audience_list,
-                            "source": source_name,
-                        }
-                    )
-                continue
-
-            if built_segments:
-                content_label, content_text = built_segments[0]
-                content = content_text
-                dominant_hint = [content_label]
-            else:
-                dominant_hint = []
-
-            if audience_counts:
-                max_votes = max(audience_counts.values())
-                dominant = [label for label, score in audience_counts.items() if score == max_votes]
-            else:
-                dominant = ["general"]
-
-            base_labels = dominant_hint if dominant_hint else dominant
-            split_results = _split_event(content, base_labels)
-            if split_results:
-                for entry in split_results:
-                    event_date = dt.date(year_value, month_number, day)
-                    title_with_suffix = entry["title"] + _format_audience_suffix(entry["audience"])
-                    events.append(
-                        {
-                            "event_date": event_date,
-                            "title": title_with_suffix,
-                            "description": entry["description"],
-                            "audience": entry["audience"],
-                            "source": source_name,
-                        }
-                    )
-                continue
-
-            audience_tags: set[str] = set()
-            for label in dominant:
-                if label == "whole_school_holiday":
-                    audience_tags.update({"whole_school", "holiday"})
-                else:
-                    audience_tags.add(label)
-
-            audience_list = sorted(audience_tags) if audience_tags else ["general"]
-            title_with_suffix = content + _format_audience_suffix(audience_list)
-            event_date = dt.date(year_value, month_number, day)
-            events.append(
-                {
-                    "event_date": event_date,
-                    "title": title_with_suffix,
-                    "description": content,
-                    "audience": audience_list,
-                    "source": source_name,
-                }
-            )
+                audience_list = _audience_from_labels(labels)
+                event_date = dt.date(year_value, month_number, day)
+                title_with_suffix = content + _format_audience_suffix(audience_list)
+                events.append(
+                    {
+                        "event_date": event_date,
+                        "title": title_with_suffix,
+                        "description": content,
+                        "audience": audience_list,
+                        "source": source_name,
+                    }
+                )
     return events
 
 

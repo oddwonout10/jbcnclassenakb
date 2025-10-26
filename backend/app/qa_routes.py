@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, constr
 from .config import Settings, get_settings
 from .email import send_email
 from .calendar_events import fetch_calendar_context
+from .calendar_resolver import CalendarAnswer, resolve_calendar_question
 from .llm_client import LLMClientError, generate_answer
 from .manual_context import match_manual_facts
 from .rag import ChunkHit, embed_text, fetch_relevant_chunks, parse_date as rag_parse_date
@@ -176,6 +177,22 @@ def _answer_contains_explicit_date(text: str) -> bool:
     return bool(DATE_REGEX.search(text) or TIME_REGEX.search(text))
 
 
+def _append_circular_suggestions(
+    parts: List[str],
+    sources: List[SourceInfo],
+    document_sources: List[SourceInfo],
+    *,
+    limit: int = 2,
+) -> None:
+    if not document_sources:
+        return
+
+    limited_docs = document_sources[:limit]
+    doc_lines = "\n".join(f"- {doc.title}" for doc in limited_docs)
+    parts.append(f"Circulars:\n{doc_lines}")
+    sources.extend(limited_docs)
+
+
 def _fetch_document_metadata(client, document_ids: List[str]) -> Dict[str, dict]:
     if not document_ids:
         return {}
@@ -319,19 +336,26 @@ def _build_prompt(
     for hit in hits:
         grouped.setdefault(hit.document_id, []).append(hit)
 
-    context_blocks: List[str] = []
-    for idx, (doc_id, doc_hits) in enumerate(grouped.items(), start=1):
+    calendar_blocks: List[str] = []
+    document_blocks: List[str] = []
+    manual_blocks: List[str] = []
+
+    def _label_for_date(value) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dt.date):
+            return value.isoformat()
+        return "Unknown date"
+
+    for doc_id, doc_hits in grouped.items():
         primary = doc_hits[0]
         meta = metadata.get(doc_id, {})
         title = meta.get("title") or primary.document_title
 
         published_on = meta.get("published_on")
-        if isinstance(published_on, str):
-            date_label = published_on
-        elif isinstance(published_on, dt.date):
-            date_label = published_on.isoformat()
-        else:
-            date_label = primary.published_on.isoformat() if primary.published_on else "Unknown date"
+        if not published_on and primary.published_on:
+            published_on = primary.published_on
+        date_label = _label_for_date(published_on)
 
         info_lines: List[str] = []
         grade_tags = meta.get("grade_tags") or []
@@ -349,20 +373,49 @@ def _build_prompt(
             snippets.append(text)
         snippet_text = "\n---\n".join(snippets)
 
-        block_lines = [f"Document {idx}: {title} ({date_label})"]
+        if doc_id.startswith("calendar:"):
+            block_lines = [
+                f"Calendar event: {title} ({date_label})",
+                "Details:",
+                snippet_text,
+            ]
+            calendar_blocks.append("\n".join(block_lines))
+            continue
+
+        if doc_id.startswith("manual:"):
+            block_lines = [
+                f"Manual note: {title}",
+                "Details:",
+                snippet_text,
+            ]
+            manual_blocks.append("\n".join(block_lines))
+            continue
+
+        block_lines = [f"Circular: {title} ({date_label})"]
         if info_lines:
             block_lines.append("\n".join(info_lines))
         block_lines.append("Content:")
         block_lines.append(snippet_text)
-        context_blocks.append("\n".join(block_lines))
+        document_blocks.append("\n".join(block_lines))
 
-    context = "\n\n".join(context_blocks)
-    instructions = (
-        "You are the class knowledge base assistant for Grade 3 families. "
-        "Answer the question using ONLY the provided documents."
-        " If the answer is not present, respond with 'I do not know based on the available circulars.'"
-        " Keep tone warm, concise, and factual."
-    )
+    context_sections: List[str] = []
+    if calendar_blocks:
+        context_sections.append("Calendar events:\n" + "\n\n".join(calendar_blocks))
+    if document_blocks:
+        context_sections.append("Circulars and documents:\n" + "\n\n".join(document_blocks))
+    if manual_blocks:
+        context_sections.append("Manual notes:\n" + "\n\n".join(manual_blocks))
+
+    context = "\n\n".join(context_sections)
+
+    instructions_parts = [
+        "You are the class knowledge base assistant for Grade 3 families.",
+        "Use the calendar events, circulars, and notes provided in the context to answer.",
+        "Cite the calendar when giving dates about schedules or breaks, and cite circulars for policy or logistics details.",
+        "If the answer is not present in any of the provided sources, respond with \"I do not know based on the available sources.\"",
+        "Keep the tone warm, concise, and factual.",
+    ]
+    instructions = " ".join(instructions_parts)
 
     temporal_section = ""
     if temporal_hints:
@@ -487,7 +540,11 @@ def answer_question(
         if hint:
             temporal_hints.append(hint)
         if reference.target_date:
-            events = fetch_calendar_events_for_window(client, reference.target_date)
+            events = fetch_calendar_events_for_window(
+                client,
+                reference.target_date,
+                grade=payload.grade,
+            )
             if events:
                 for event in events:
                     event_hint_lines.append(format_event_summary(event))
@@ -497,7 +554,12 @@ def answer_question(
             range_length = (reference.range_end - reference.range_start).days
             midpoint = reference.range_start + dt.timedelta(days=range_length // 2)
             window = max(7, range_length + 1)
-            events = fetch_calendar_events_for_window(client, midpoint, window)
+            events = fetch_calendar_events_for_window(
+                client,
+                midpoint,
+                window,
+                grade=payload.grade,
+            )
             for event in events:
                 event_hint_lines.append(format_event_summary(event))
 
@@ -515,6 +577,14 @@ def answer_question(
             temporal_hints.append(f"Calendar note: {line}")
             if len(temporal_hints) >= 8:
                 break
+
+    calendar_answer = resolve_calendar_question(
+        client=client,
+        question=question,
+        reference_date=now_ist.date(),
+        grade=payload.grade,
+    )
+    doc_suggestions = _fetch_document_fuzzy(client, question, limit=3)
 
     if holiday_result is None and date_references:
         for reference in date_references:
@@ -571,7 +641,7 @@ def answer_question(
         event = holiday_result["event"]
         start = holiday_result["start"]
         answer_text = holiday_result["answer"]
-        source = SourceInfo(
+        calendar_source = SourceInfo(
             document_id=f"calendar:{event.get('id') or event.get('title')}",
             title=event.get("title", "Calendar event"),
             published_on=start.isoformat(),
@@ -580,20 +650,24 @@ def answer_question(
             storage_path="",
             similarity=1.0,
         )
+        parts = [f"Calendar: {answer_text}"]
+        sources = [calendar_source]
+        _append_circular_suggestions(parts, sources, doc_suggestions)
+        final_answer = "\n\n".join(parts)
         _log_interaction(
             client=client,
             question=question,
-            answer=answer_text,
+            answer=final_answer,
             status_label="answered",
-            sources=[source],
+            sources=sources,
             similarity=None,
             latency_ms=int((time.perf_counter() - start_time) * 1000),
             model_name="deterministic-calendar",
         )
-        return QAResponse(status="answered", answer=answer_text, sources=[source])
+        return QAResponse(status="answered", answer=final_answer, sources=sources)
 
     if holiday_result is None and upcoming_requested:
-        upcoming = upcoming_holiday_event(client, now_ist.date())
+        upcoming = upcoming_holiday_event(client, now_ist.date(), grade=payload.grade)
         current_break = upcoming.get("current") if upcoming else None
         next_break = upcoming.get("next") if upcoming else None
 
@@ -636,8 +710,8 @@ def answer_question(
                         similarity=1.0,
                     )
                 )
-
-            answer_text = " ".join(parts)
+            _append_circular_suggestions(parts, sources, doc_suggestions)
+            answer_text = "\n\n".join(parts)
             _log_interaction(
                 client=client,
                 question=question,
@@ -649,6 +723,33 @@ def answer_question(
                 model_name="deterministic-calendar",
             )
             return QAResponse(status="answered", answer=answer_text, sources=sources)
+
+    if calendar_answer:
+        calendar_text = calendar_answer.formatted_answer()
+        calendar_source = SourceInfo(
+            document_id=f"calendar:{calendar_answer.event_id}",
+            title=calendar_answer.title,
+            published_on=calendar_answer.start.isoformat(),
+            original_filename=calendar_answer.source or "calendar",
+            signed_url=None,
+            storage_path="",
+            similarity=calendar_answer.score,
+        )
+        parts = [f"Calendar: {calendar_text}"]
+        sources = [calendar_source]
+        _append_circular_suggestions(parts, sources, doc_suggestions)
+        answer_text = "\n\n".join(parts)
+        _log_interaction(
+            client=client,
+            question=question,
+            answer=answer_text,
+            status_label="answered",
+            sources=sources,
+            similarity=None,
+            latency_ms=int((time.perf_counter() - start_time) * 1000),
+            model_name="calendar-resolver",
+        )
+        return QAResponse(status="answered", answer=answer_text, sources=sources)
 
     embedding = embed_text(question)
 

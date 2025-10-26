@@ -22,5 +22,5 @@ export interface CalendarEvent {
   audience: string[];
   source?: string | null;
   summary?: string;
+  description?: string | null;
 }
-
