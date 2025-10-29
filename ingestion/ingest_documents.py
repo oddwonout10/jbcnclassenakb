@@ -91,32 +91,29 @@ def upload_file(storage_path: str, local_path: Path, *, force: bool = False) -> 
         # default to PDF for common circulars, otherwise generic binary
         content_type = "application/pdf" if local_path.suffix.lower() == ".pdf" else "application/octet-stream"
 
-    upload_options = {"contentType": content_type, "upsert": False}
-    update_options = {"contentType": content_type}
-
-    def _upload(method: str) -> None:
-        with local_path.open("rb") as file_handle:
-            if method == "update":
-                bucket_client.update(storage_path, file_handle, update_options)
-            else:
-                bucket_client.upload(storage_path, file_handle, upload_options)
-
-    if force:
-        try:
-            _upload("update")
-        except Exception as exc:
-            LOGGER.info(
-                "Update failed for %s (%s); falling back to upload.", storage_path, exc
-            )
-            _upload("upload")
-        return
+    upsert_flag = "true" if force else "false"
+    upload_options = {"contentType": content_type, "upsert": upsert_flag}
 
     try:
-        _upload("upload")
+        with local_path.open("rb") as file_handle:
+            bucket_client.upload(storage_path, file_handle, upload_options)
     except Exception as exc:
         message = str(exc)
-        if "Duplicate" in message or "already exists" in message:
+        if not force and ("Duplicate" in message or "already exists" in message):
             LOGGER.info("File %s already exists in storage. Skipping upload.", storage_path)
+            return
+        if force:
+            LOGGER.warning(
+                "Forced upload failed for %s (%s); attempting overwrite fallback.",
+                storage_path,
+                exc,
+            )
+            with local_path.open("rb") as file_handle:
+                bucket_client.upload(
+                    storage_path,
+                    file_handle,
+                    {"contentType": content_type, "upsert": "true"},
+                )
             return
         raise
 
