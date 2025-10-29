@@ -68,8 +68,8 @@ export function AssistantPanel() {
   const widgetIdRef = useRef<string | null>(null);
 
   const suggestions = [
-    "When is Diwali vacation?",
-    "When is Nashik trip?",
+    "When is Christmas break?",
+    "When is edu trip?",
     "Who is on the PTA?",
   ];
 
