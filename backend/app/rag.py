@@ -65,6 +65,8 @@ class ChunkHit:
     original_filename: str
     published_on: dt.date | None
     storage_path: str
+    page_number: int | None = None
+    section_heading: str | None = None
     score: float = 0.0
 
 
@@ -198,7 +200,7 @@ def _keyword_document_matches(
     for doc in documents:
         chunk_resp = (
             client.table("document_chunks")
-            .select("document_id,chunk_index,content,published_on")
+            .select("document_id,chunk_index,content,published_on,page_number,section_heading")
             .eq("document_id", doc["id"])
             .order("chunk_index")
             .limit(chunks_per_document)
@@ -219,6 +221,8 @@ def _keyword_document_matches(
                 original_filename=doc.get("original_filename", ""),
                 published_on=parse_date(doc.get("published_on")),
                 storage_path=doc.get("storage_path", ""),
+                page_number=row.get("page_number"),
+                section_heading=row.get("section_heading"),
             )
             recency = _compute_recency_boost(hit.published_on)
             hit.score = 0.85 * hit.similarity + 0.15 * recency
@@ -259,6 +263,8 @@ def fetch_relevant_chunks(
             original_filename=row.get("original_filename", ""),
             published_on=parse_date(row.get("document_published_on")),
             storage_path=row.get("storage_path", ""),
+             page_number=row.get("page_number"),
+             section_heading=row.get("section_heading"),
         )
         recency = _compute_recency_boost(hit.published_on)
         hit.score = 0.85 * hit.similarity + 0.15 * recency

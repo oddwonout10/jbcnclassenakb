@@ -84,9 +84,15 @@ DOC_TYPE_KEYWORDS = {
     "timetable": "notice",
     "menu": "notice",
     "newsletter": "newsletter",
-    "newsletter": "newsletter",
     "form": "form",
     "consent": "form",
+    "permission": "form",
+    "slip": "form",
+    "assessment": "assessment",
+    "exam": "assessment",
+    "fee": "notice",
+    "payment": "notice",
+    "holiday": "holiday",
 }
 
 

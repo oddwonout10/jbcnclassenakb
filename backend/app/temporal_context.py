@@ -552,6 +552,9 @@ def upcoming_break_from_matches(matches: Iterable[dict], reference_date: dt.date
     best_future_start: Optional[dt.date] = None
 
     for match in matches:
+        title_lower = (match.get("title") or "").lower()
+        if not any(keyword in title_lower for keyword in HOLIDAY_KEYWORDS):
+            continue
         start = parse_date(match.get("event_date"))
         end = parse_date(match.get("end_date")) or start
         if not start:

@@ -15,10 +15,11 @@ from tqdm import tqdm
 
 from .config import get_settings
 from .supabase_client import get_supabase_client
-from .utils.chunks import TextChunk, chunk_text
+from .utils.chunks import TextChunk, chunk_pages
 from .utils.date_parser import determine_document_date
-from .utils.text_extraction import extract_text
 from .utils.metadata import infer_metadata
+from .utils.structured import extract_structured_data, StructuredDocumentData
+from .utils.text_extraction import extract_text, extract_page_texts, extract_pdf_layout
 from openai import OpenAI
 
 
@@ -179,6 +180,8 @@ def insert_chunks(
                 "content": chunk.content,
                 "published_on": published_on.isoformat(),
                 "embedding": vector,
+                "page_number": chunk.page,
+                "section_heading": chunk.heading,
             }
         )
     client.table("document_chunks").insert(rows).execute()
@@ -187,6 +190,121 @@ def insert_chunks(
 def purge_document_chunks(document_id: str) -> None:
     client = get_supabase_client()
     client.table("document_chunks").delete().eq("document_id", document_id).execute()
+
+
+def _bulk_insert(table_name: str, rows: List[dict]) -> None:
+    if not rows:
+        return
+    client = get_supabase_client()
+    try:
+        client.table(table_name).insert(rows).execute()
+    except Exception as exc:  # pragma: no cover - depends on Supabase schema
+        LOGGER.warning("Failed to insert structured rows into %s: %s", table_name, exc)
+
+
+def _update_document_structured_fields(document_id: str, data: StructuredDocumentData) -> None:
+    payload: dict[str, object] = {}
+    if data.issued_date:
+        payload["issued_on"] = data.issued_date.isoformat()
+    if data.effective_start:
+        payload["effective_start_on"] = data.effective_start.isoformat()
+    if data.effective_end:
+        payload["effective_end_on"] = data.effective_end.isoformat()
+    if data.title_confidence is not None:
+        payload["title_confidence"] = float(data.title_confidence)
+    if data.audience:
+        payload["audience"] = list({aud for aud in data.audience if aud})
+    if payload:
+        client = get_supabase_client()
+        try:
+            client.table("documents").update(payload).eq("id", document_id).execute()
+        except Exception as exc:  # pragma: no cover - schema dependent
+            LOGGER.warning("Failed to update structured fields on documents: %s", exc)
+
+
+def store_structured_metadata(document_id: str, data: StructuredDocumentData) -> None:
+    _update_document_structured_fields(document_id, data)
+
+    date_rows = [
+        {
+            "document_id": document_id,
+            "date_type": item.kind,
+            "date_value": item.date.isoformat(),
+            "raw_text": item.text,
+            "confidence": item.confidence,
+        }
+        for item in data.dates
+    ]
+    _bulk_insert("document_dates", date_rows)
+
+    action_rows = [
+        {
+            "document_id": document_id,
+            "description": action.description,
+            "due_date": action.due_date.isoformat() if action.due_date else None,
+            "audience": action.audience,
+            "confidence": action.confidence,
+            "source_excerpt": action.source_excerpt,
+        }
+        for action in data.actions
+    ]
+    _bulk_insert("document_actions", action_rows)
+
+    contact_rows = [
+        {
+            "document_id": document_id,
+            "contact_name": contact.name,
+            "role": contact.role,
+            "email": contact.email,
+            "phone": contact.phone,
+            "notes": contact.notes,
+        }
+        for contact in data.contacts
+    ]
+    _bulk_insert("document_contacts", contact_rows)
+
+    entity_rows = [
+        {
+            "document_id": document_id,
+            "entity_value": entity.value,
+            "entity_type": entity.entity_type,
+            "confidence": entity.confidence,
+            "context": entity.context,
+        }
+        for entity in data.entities
+    ]
+    _bulk_insert("document_entities", entity_rows)
+
+    summary_rows = [
+        {
+            "document_id": document_id,
+            "page_number": summary.page_number,
+            "summary": summary.summary,
+        }
+        for summary in data.page_summaries
+    ]
+    _bulk_insert("document_page_summaries", summary_rows)
+
+    heading_rows = [
+        {
+            "document_id": document_id,
+            "page_number": heading.page_number,
+            "heading_text": heading.text,
+            "heading_level": heading.level,
+        }
+        for heading in data.headings
+    ]
+    _bulk_insert("document_headings", heading_rows)
+
+    table_rows = [
+        {
+            "document_id": document_id,
+            "page_number": table.page_number,
+            "table_data": json.dumps(table.rows),
+        }
+        for table in data.tables
+    ]
+    _bulk_insert("document_tables", table_rows)
 
 
 def ensure_bucket_exists() -> None:
@@ -255,6 +373,8 @@ def ingest(
 
         LOGGER.info("Processing %s", path.name)
         text, page_count = extract_text(path)
+        page_texts = extract_page_texts(path)
+        layout_info = extract_pdf_layout(path) if path.suffix.lower() == ".pdf" else []
         if not text.strip():
             LOGGER.warning("No text content extracted from %s. Skipping.", path)
             continue
@@ -300,8 +420,16 @@ def ingest(
             event_tags,
         )
 
-        chunks = chunk_text(
-            text,
+        structured_data = extract_structured_data(
+            text=text,
+            page_texts=page_texts,
+            published_on=published_on,
+            audience=grade_tags,
+            layout=layout_info,
+        )
+
+        chunks = chunk_pages(
+            page_texts,
             chunk_size=settings.chunk_size,
             overlap=settings.chunk_overlap,
         )
@@ -343,6 +471,8 @@ def ingest(
 
         insert_chunks(document_id, published_on, chunks, embeddings)
         LOGGER.info("Stored %s with %d chunks.", path.name, len(chunks))
+
+        store_structured_metadata(document_id, structured_data)
 
 
 if __name__ == "__main__":

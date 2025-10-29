@@ -28,3 +28,14 @@ def test_detect_quick_link_type_cafeteria():
 def test_answer_contains_explicit_date():
     assert qa_routes._answer_contains_explicit_date("Event is on 12 Oct 2025 at 10:00 am")
     assert not qa_routes._answer_contains_explicit_date("Schedule to be announced soon")
+
+
+def test_extract_structured_keywords_filters_stopwords():
+    keywords = qa_routes._extract_structured_keywords("When does Diwali break end?")
+    assert "diwali" in keywords
+    assert "when" not in keywords
+
+
+def test_detect_date_intent_end():
+    intent = qa_routes._detect_date_intent("when does term end?".lower())
+    assert intent == "end"

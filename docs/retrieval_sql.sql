@@ -15,7 +15,9 @@ returns table (
   document_title text,
   document_published_on date,
   storage_path text,
-  original_filename text
+  original_filename text,
+  page_number integer,
+  section_heading text
 )
 language plpgsql
 security definer
@@ -31,7 +33,9 @@ begin
     d.title as document_title,
     d.published_on as document_published_on,
     d.storage_path,
-    d.original_filename
+    d.original_filename,
+    dc.page_number,
+    dc.section_heading
   from public.document_chunks dc
   join public.documents d on d.id = dc.document_id
   where
@@ -60,7 +64,9 @@ create or replace function public.match_document_chunks_fuzzy(
   published_on date,
   document_title text,
   original_filename text,
-  storage_path text
+  storage_path text,
+  page_number int,
+  section_heading text
 )
 language sql stable as $$
   select
@@ -75,7 +81,9 @@ language sql stable as $$
     dc.published_on,
     d.title as document_title,
     d.original_filename,
-    d.storage_path
+    d.storage_path,
+    dc.page_number,
+    dc.section_heading
   from public.document_chunks dc
   join public.documents d on d.id = dc.document_id
   where to_tsvector('english', dc.content) @@ plainto_tsquery('english', q)

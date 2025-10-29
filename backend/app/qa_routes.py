@@ -102,6 +102,47 @@ QUICK_LINK_KEYWORD_MAP = {
 DATE_REGEX = re.compile(r"\b(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+|\d{4}-\d{2}-\d{2})\b")
 TIME_REGEX = re.compile(r"\b\d{1,2}(:\d{2})?\s?(?:am|pm|hrs)\b", re.IGNORECASE)
 
+STRUCTURED_STOPWORDS = {
+    "what",
+    "when",
+    "where",
+    "who",
+    "how",
+    "does",
+    "do",
+    "is",
+    "the",
+    "a",
+    "an",
+    "for",
+    "with",
+    "and",
+    "or",
+    "on",
+    "in",
+    "to",
+    "of",
+    "tell",
+    "about",
+    "please",
+    "share",
+    "info",
+    "information",
+    "details",
+    "help",
+    "me",
+    "we",
+    "need",
+    "any",
+}
+
+DATE_INTENT_KEYWORDS = {
+    "deadline": {"deadline", "due", "last date", "submit", "submission", "duedate"},
+    "resume": {"resume", "reopen", "reopens", "restart"},
+    "end": {"end", "ends", "finish", "finishes", "over", "closing"},
+    "start": {"start", "starts", "begin", "begins", "commence", "opens"},
+}
+
 
 def _format_sources_section(sources: List[SourceInfo]) -> str:
     if not sources:
@@ -177,6 +218,234 @@ def _answer_contains_explicit_date(text: str) -> bool:
     return bool(DATE_REGEX.search(text) or TIME_REGEX.search(text))
 
 
+def _extract_structured_keywords(question: str, limit: int = 6) -> List[str]:
+    tokens = re.findall(r"[a-z0-9]+", question.lower())
+    keywords: List[str] = []
+    for token in tokens:
+        if len(token) < 3:
+            continue
+        if token in STRUCTURED_STOPWORDS:
+            continue
+        keywords.append(token)
+        if len(keywords) >= limit:
+            break
+    return keywords
+
+
+def _detect_date_intent(lowered_question: str) -> Optional[str]:
+    for intent, words in DATE_INTENT_KEYWORDS.items():
+        if any(word in lowered_question for word in words):
+            return intent
+    return None
+
+
+def _source_info_from_documents_row(client, row: dict, doc: dict, similarity: float = 1.0) -> SourceInfo:
+    document_id = row.get("document_id") or doc.get("id")
+    storage_path = doc.get("storage_path") or ""
+    return SourceInfo(
+        document_id=str(document_id),
+        title=doc.get("title") or "Circular",
+        published_on=doc.get("published_on"),
+        original_filename=doc.get("original_filename") or "",
+        signed_url=_create_signed_url(client, storage_path),
+        storage_path=storage_path,
+        similarity=similarity,
+    )
+
+
+def _structured_date_lookup(
+    *,
+    client,
+    keywords: List[str],
+    date_kind: str,
+    grade: Optional[str],
+) -> Optional[tuple[str, List[SourceInfo], str]]:
+    try:
+        query = (
+            client.table("document_dates")
+            .select(
+                "document_id,date_type,date_value,raw_text,confidence,documents(title,published_on,storage_path,original_filename,grade_tags)"
+            )
+            .eq("date_type", date_kind)
+            .order("confidence", desc=True)
+        )
+    except Exception as exc:  # pragma: no cover - Supabase errors
+        logger.warning("Structured date lookup failed to build query: %s", exc)
+        return None
+
+    if grade:
+        try:
+            query = query.contains("documents.grade_tags", [grade])
+        except Exception:
+            # not all Supabase installs support contains on joined tables
+            pass
+
+    if keywords:
+        or_filters = []
+        for token in keywords:
+            pattern = f"*{token}*"
+            or_filters.append(f"raw_text.ilike.{pattern}")
+            or_filters.append(f"documents.title.ilike.{pattern}")
+        try:
+            query = query.or_(",".join(or_filters))
+        except Exception:
+            pass
+
+    try:
+        response = query.limit(5).execute()
+    except Exception as exc:  # pragma: no cover - Supabase errors
+        logger.warning("Structured date lookup query error: %s", exc)
+        return None
+
+    rows = response.data or []
+    if not rows:
+        return None
+
+    best_row = max(rows, key=lambda r: r.get("confidence") or 0.5)
+    doc = best_row.get("documents") or {}
+    date_value = best_row.get("date_value")
+    if not date_value:
+        return None
+    try:
+        if isinstance(date_value, dt.date):
+            date_obj = date_value
+        else:
+            date_obj = dt.date.fromisoformat(str(date_value))
+    except Exception:
+        return None
+
+    formatted_date = format_date(date_obj)
+    doc_title = doc.get("title") or "This circular"
+    action_phrase = {
+        "deadline": "is due on",
+        "resume": "resumes on",
+        "end": "ends on",
+        "start": "starts on",
+    }.get(date_kind, "is on")
+    answer = f"{doc_title} {action_phrase} {formatted_date}."
+
+    sources = [_source_info_from_documents_row(client, best_row, doc)]
+    return answer, sources, f"structured-date-{date_kind}"
+
+
+def _structured_contact_lookup(
+    *,
+    client,
+    keywords: List[str],
+    role: Optional[str],
+    grade: Optional[str],
+) -> Optional[tuple[str, List[SourceInfo], str]]:
+    try:
+        query = (
+            client.table("document_contacts")
+            .select(
+                "document_id,contact_name,role,email,phone,notes,documents(title,published_on,storage_path,original_filename,grade_tags)"
+            )
+            .order("created_at", desc=True)
+        )
+    except Exception as exc:
+        logger.warning("Structured contact lookup failed to build query: %s", exc)
+        return None
+
+    if role:
+        try:
+            query = query.ilike("role", f"%{role}%")
+        except Exception:
+            pass
+
+    if grade:
+        try:
+            query = query.contains("documents.grade_tags", [grade])
+        except Exception:
+            pass
+
+    if keywords:
+        or_filters = []
+        for token in keywords:
+            pattern = f"*{token}*"
+            or_filters.append(f"notes.ilike.{pattern}")
+            or_filters.append(f"documents.title.ilike.{pattern}")
+        try:
+            query = query.or_(",".join(or_filters))
+        except Exception:
+            pass
+
+    try:
+        response = query.limit(5).execute()
+    except Exception as exc:
+        logger.warning("Structured contact lookup query error: %s", exc)
+        return None
+
+    rows = response.data or []
+    if not rows:
+        return None
+
+    best_row = rows[0]
+    doc = best_row.get("documents") or {}
+    contact_name = best_row.get("contact_name")
+    contact_role = best_row.get("role") or role
+    email = best_row.get("email")
+    phone = best_row.get("phone")
+
+    doc_title = doc.get("title") or "the circular"
+    parts: List[str] = []
+    if contact_name:
+        parts.append(contact_name)
+    if contact_role:
+        parts.append(f"({contact_role})")
+    contact_label = " ".join(parts) or "Contact"
+
+    details: List[str] = []
+    if phone:
+        details.append(f"phone {phone}")
+    if email:
+        details.append(f"email {email}")
+    if not details and best_row.get("notes"):
+        details.append(best_row["notes"])
+
+    if details:
+        detail_text = " and ".join(details)
+        answer = f"{contact_label} in {doc_title} can be reached via {detail_text}."
+    else:
+        answer = f"{contact_label} is listed in {doc_title}."
+
+    sources = [_source_info_from_documents_row(client, best_row, doc, similarity=0.9)]
+    return answer, sources, "structured-contact"
+
+
+def _dedupe_sources(sources: List[SourceInfo]) -> List[SourceInfo]:
+    seen: set[str] = set()
+    unique: List[SourceInfo] = []
+    for src in sources:
+        if src.document_id in seen:
+            continue
+        seen.add(src.document_id)
+        unique.append(src)
+    return unique
+
+
+def _lookup_structured_fact(
+    *,
+    client,
+    question: str,
+    grade: Optional[str],
+) -> Optional[tuple[str, List[SourceInfo], str]]:
+    lowered = question.lower()
+    keywords = _extract_structured_keywords(question)
+
+    date_intent = _detect_date_intent(lowered)
+    if date_intent:
+        result = _structured_date_lookup(client=client, keywords=keywords, date_kind=date_intent, grade=grade)
+        if result:
+            return result
+
+    contact_role = _infer_contact_role(lowered)
+    if contact_role:
+        result = _structured_contact_lookup(client=client, keywords=keywords, role=contact_role, grade=grade)
+        if result:
+            return result
+
+    return None
 def _append_circular_suggestions(
     parts: List[str],
     sources: List[SourceInfo],
@@ -198,7 +467,7 @@ def _fetch_document_metadata(client, document_ids: List[str]) -> Dict[str, dict]
         return {}
     response = (
         client.table("documents")
-        .select("id,title,published_on,grade_tags,event_tags,doc_type")
+        .select("id,title,published_on,grade_tags,event_tags,doc_type,issued_on,effective_start_on,effective_end_on,audience,title_confidence")
         .in_("id", document_ids)
         .execute()
     )
@@ -360,16 +629,38 @@ def _build_prompt(
         info_lines: List[str] = []
         grade_tags = meta.get("grade_tags") or []
         event_tags = meta.get("event_tags") or []
+        audience_tags = meta.get("audience") or []
+        issued_on = meta.get("issued_on")
+        effective_start = meta.get("effective_start_on")
+        effective_end = meta.get("effective_end_on")
         if grade_tags:
             info_lines.append("Grades: " + ", ".join(grade_tags))
         if event_tags:
             info_lines.append("Topics: " + ", ".join(event_tags))
+        if audience_tags:
+            info_lines.append("Audience: " + ", ".join(audience_tags))
+        if issued_on:
+            info_lines.append("Issued: " + _label_for_date(issued_on))
+        range_parts: List[str] = []
+        if effective_start:
+            range_parts.append(_label_for_date(effective_start))
+        if effective_end:
+            range_parts.append(_label_for_date(effective_end))
+        if range_parts:
+            info_lines.append("Effective: " + " – ".join(range_parts))
 
         snippets: List[str] = []
         for chunk in doc_hits[:2]:
             text = chunk.content.strip()
             if len(text) > 600:
                 text = text[:600].rsplit(" ", 1)[0] + "…"
+            prefix_parts: List[str] = []
+            if chunk.page_number:
+                prefix_parts.append(f"Page {chunk.page_number}")
+            if chunk.section_heading:
+                prefix_parts.append(chunk.section_heading.strip())
+            if prefix_parts:
+                text = f"{' – '.join(prefix_parts)}\n{text}"
             snippets.append(text)
         snippet_text = "\n---\n".join(snippets)
 
@@ -578,6 +869,8 @@ def answer_question(
             if len(temporal_hints) >= 8:
                 break
 
+    grade_label = payload.grade or "Grade 3"
+
     calendar_answer = resolve_calendar_question(
         client=client,
         question=question,
@@ -585,6 +878,12 @@ def answer_question(
         grade=payload.grade,
     )
     doc_suggestions = _fetch_document_fuzzy(client, question, limit=3)
+
+    structured_lookup = _lookup_structured_fact(
+        client=client,
+        question=question,
+        grade=grade_label,
+    )
 
     if holiday_result is None and date_references:
         for reference in date_references:
@@ -724,6 +1023,25 @@ def answer_question(
             )
             return QAResponse(status="answered", answer=answer_text, sources=sources)
 
+    if structured_lookup:
+        structured_answer, structured_sources, model_name = structured_lookup
+        parts = [structured_answer]
+        sources = structured_sources[:]
+        _append_circular_suggestions(parts, sources, doc_suggestions)
+        sources = _dedupe_sources(sources)
+        answer_text = "\n\n".join(parts)
+        _log_interaction(
+            client=client,
+            question=question,
+            answer=answer_text,
+            status_label="answered",
+            sources=sources,
+            similarity=None,
+            latency_ms=int((time.perf_counter() - start_time) * 1000),
+            model_name=model_name,
+        )
+        return QAResponse(status="answered", answer=answer_text, sources=sources)
+
     if calendar_answer:
         calendar_text = calendar_answer.formatted_answer()
         calendar_source = SourceInfo(
@@ -738,6 +1056,7 @@ def answer_question(
         parts = [f"Calendar: {calendar_text}"]
         sources = [calendar_source]
         _append_circular_suggestions(parts, sources, doc_suggestions)
+        sources = _dedupe_sources(sources)
         answer_text = "\n\n".join(parts)
         _log_interaction(
             client=client,

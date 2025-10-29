@@ -54,6 +54,28 @@ def infer_date_from_text(text: str) -> Optional[dt.date]:
     return None
 
 
+def extract_all_dates(text: str) -> list[tuple[str, dt.date]]:
+    """Return a list of (matched_text, date) tuples for every recognised date string."""
+    results: list[tuple[str, dt.date]] = []
+    for pattern in DATE_PATTERNS:
+        for match in pattern.finditer(text):
+            raw = match.group(0)
+            groups = match.groupdict()
+            try:
+                year = int(groups["year"])
+                month_raw = groups["month"]
+                if month_raw.isdigit():
+                    month = int(month_raw)
+                else:
+                    month = MONTH_LOOKUP[month_raw.lower()]
+                day = int(groups["day"])
+                candidate = dt.date(year, month, day)
+            except Exception:
+                continue
+            results.append((raw, candidate))
+    return results
+
+
 def infer_date_from_filename(path: Path) -> Optional[dt.date]:
     name = path.stem
     # simple YYYYMMDD pattern

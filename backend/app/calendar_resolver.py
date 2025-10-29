@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from rapidfuzz import fuzz
 
@@ -74,6 +74,13 @@ PREVIOUS_WORDS = {"last", "previous", "earlier", "ago"}
 DURATION_WORDS = {"howlong", "duration"}
 
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+
+DATE_INTENT_KEYWORDS = {
+    "end": {"end", "ends", "finish", "finishes", "closing", "over"},
+    "start": {"start", "starts", "begin", "begins", "commence", "opens"},
+    "resume": {"resume", "reopen", "reopens", "restart"},
+    "deadline": {"deadline", "due", "last date"},
+}
 
 
 @dataclass
@@ -193,6 +200,12 @@ def _clean_keywords(tokens: Iterable[str]) -> List[str]:
         if canonical and canonical not in GENERIC_WORDS:
             cleaned.append(canonical)
     return cleaned
+
+def _detect_date_intent(lowered_question: str) -> Optional[str]:
+    for intent, keywords in DATE_INTENT_KEYWORDS.items():
+        if any(keyword in lowered_question for keyword in keywords):
+            return intent
+    return None
 
 
 def _parse_dates(row: dict) -> tuple[Optional[dt.date], Optional[dt.date]]:
@@ -320,6 +333,7 @@ def resolve_calendar_question(
     question_lower = question.lower()
     tokens = _tokenize(question_lower)
     keywords = _clean_keywords(tokens)
+    intent_label = _detect_date_intent(question_lower)
 
     mode = "specific"
     if any(word in question_lower for word in NEXT_WORDS):
@@ -338,6 +352,7 @@ def resolve_calendar_question(
         return None
 
     aggregated_events = _aggregate_events(events)
+    aggregated_map: Dict[str, CalendarEventRecord] = {event.normalized_title: event for event in aggregated_events}
 
     date_refs = infer_date_references(question, dt.datetime.combine(reference_date, dt.time()))
     explicit_dates = [ref.target_date for ref in date_refs if ref.target_date]
@@ -434,6 +449,13 @@ def resolve_calendar_question(
                 best_event = event
                 best_score = score
         if best_event and best_score >= 45:
+            agg_candidate = aggregated_map.get(best_event.normalized_title)
+            if agg_candidate and agg_candidate.duration_days > best_event.duration_days:
+                prefers_span = intent_label in {"end", "resume", "start"}
+                keyword_match = not required_keywords or any(_event_contains_keyword(agg_candidate, kw) for kw in required_keywords)
+                if prefers_span or keyword_match:
+                    agg_candidate.description = ""
+                    best_event = agg_candidate
             if required_keywords and not any(_event_contains_keyword(best_event, kw) for kw in required_keywords):
                 best_event = None
             else:
