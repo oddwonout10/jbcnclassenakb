@@ -5,6 +5,7 @@ import os
 import hashlib
 import json
 import logging
+import mimetypes
 import re
 import unicodedata
 from pathlib import Path
@@ -85,12 +86,20 @@ def upload_file(storage_path: str, local_path: Path, *, force: bool = False) -> 
     bucket = get_settings().storage_bucket
     bucket_client = client.storage.from_(bucket)
 
+    content_type, _ = mimetypes.guess_type(str(local_path))
+    if not content_type:
+        # default to PDF for common circulars, otherwise generic binary
+        content_type = "application/pdf" if local_path.suffix.lower() == ".pdf" else "application/octet-stream"
+
+    upload_options = {"contentType": content_type, "upsert": False}
+    update_options = {"contentType": content_type}
+
     def _upload(method: str) -> None:
         with local_path.open("rb") as file_handle:
             if method == "update":
-                bucket_client.update(storage_path, file_handle)
+                bucket_client.update(storage_path, file_handle, update_options)
             else:
-                bucket_client.upload(storage_path, file_handle, {"upsert": False})
+                bucket_client.upload(storage_path, file_handle, upload_options)
 
     if force:
         try:

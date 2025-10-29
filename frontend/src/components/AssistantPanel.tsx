@@ -223,13 +223,21 @@ export function AssistantPanel() {
     }
   }
 
+  const pendingTurn =
+    isLoading &&
+    conversation.length > 0 &&
+    conversation[conversation.length - 1]?.role === "user"
+      ? conversation[conversation.length - 1]
+      : null;
+
   const conversationGroups = useMemo(() => {
     const groups: ConversationTurn[][] = [];
-    let index = conversation.length - 1;
+    const effectiveConversation = pendingTurn ? conversation.slice(0, -1) : conversation;
+    let index = effectiveConversation.length - 1;
 
     while (index >= 0) {
-      const current = conversation[index];
-      const previous = conversation[index - 1];
+      const current = effectiveConversation[index];
+      const previous = effectiveConversation[index - 1];
 
       if (
         current?.role === "assistant" &&
@@ -244,7 +252,7 @@ export function AssistantPanel() {
     }
 
     return groups;
-  }, [conversation]);
+  }, [conversation, pendingTurn]);
 
   return (
     <section className="flex w-full flex-col gap-5 rounded-3xl border border-[#ffe4c4] bg-[#fffdf7] p-6 shadow-[0_18px_35px_rgba(255,175,109,0.25)]">
@@ -347,7 +355,20 @@ export function AssistantPanel() {
             </div>
           </div>
         ) : null}
-        {isLoading && conversation.length > 0 ? (
+        {pendingTurn ? (
+          <div
+            className="relative mt-3 rounded-3xl border border-[#ffd8ad] bg-white/90 p-4 text-sm text-[#2f3142] shadow-sm"
+            aria-live="polite"
+          >
+            <span className="absolute -top-3 left-4 flex items-center gap-1 rounded-full bg-white px-3 py-1 text-xs font-semibold text-[#4e5d78] shadow">
+              👩‍👧 You asked
+            </span>
+            <p className="mt-3 whitespace-pre-wrap text-base leading-relaxed">
+              {pendingTurn.text}
+            </p>
+          </div>
+        ) : null}
+        {conversationGroups.length > 0 ? (
           <div className="flex items-center gap-3 text-xs font-semibold uppercase tracking-wide text-[#a3adb6]">
             <span className="h-px flex-1 bg-gradient-to-r from-transparent via-[#d9e3ea] to-[#d9e3ea]/0" />
             <span>Previous replies</span>
