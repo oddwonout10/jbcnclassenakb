@@ -429,7 +429,7 @@ def _lookup_structured_fact(
     client,
     question: str,
     grade: Optional[str],
-) -> Optional[tuple[str, List[SourceInfo], str]]:
+) -> tuple[Optional[tuple[str, List[SourceInfo], str]], Optional[str]]:
     lowered = question.lower()
     keywords = _extract_structured_keywords(question)
 
@@ -437,15 +437,34 @@ def _lookup_structured_fact(
     if date_intent:
         result = _structured_date_lookup(client=client, keywords=keywords, date_kind=date_intent, grade=grade)
         if result:
-            return result
+            return result, date_intent
+        return None, date_intent
 
     contact_role = _infer_contact_role(lowered)
     if contact_role:
         result = _structured_contact_lookup(client=client, keywords=keywords, role=contact_role, grade=grade)
         if result:
-            return result
+            return result, "contact"
+        return None, "contact"
 
+    return None, None
+
+def _structured_intent_fallback(question: str, intent_label: Optional[str] = None) -> Optional[tuple[str, List[SourceInfo], str]]:
+    lowered = question.lower()
+    if intent_label == "contact" or any(word in lowered for word in ("contact", "phone", "email")):
+        answer = (
+            "I couldn't find a contact for that in the current circulars. "
+            "Please review the latest transport or administrative circular, or reach out to the class parent."
+        )
+        return answer, [], "no-structured-contact"
+    if intent_label in {"end", "resume", "start", "deadline"} or any(word in lowered for word in ("deadline", "end", "resume")):
+        answer = (
+            "I couldn't find a specific date for that in the available circulars. "
+            "Please check the latest circular or ask the class parent for confirmation."
+        )
+        return answer, [], "no-structured-date"
     return None
+
 def _append_circular_suggestions(
     parts: List[str],
     sources: List[SourceInfo],
@@ -1023,13 +1042,11 @@ def answer_question(
             )
             return QAResponse(status="answered", answer=answer_text, sources=sources)
 
-    if structured_lookup:
-        structured_answer, structured_sources, model_name = structured_lookup
-        parts = [structured_answer]
-        sources = structured_sources[:]
-        _append_circular_suggestions(parts, sources, doc_suggestions)
-        sources = _dedupe_sources(sources)
-        answer_text = "\n\n".join(parts)
+    structured_result, structured_intent = structured_lookup
+    if structured_result:
+        structured_answer, structured_sources, model_name = structured_result
+        sources = _dedupe_sources(structured_sources[:])
+        answer_text = structured_answer
         _log_interaction(
             client=client,
             question=question,
@@ -1041,6 +1058,22 @@ def answer_question(
             model_name=model_name,
         )
         return QAResponse(status="answered", answer=answer_text, sources=sources)
+
+    if structured_intent:
+        fallback = _structured_intent_fallback(question, intent_label=structured_intent)
+        if fallback:
+            answer_text, fallback_sources, status_label = fallback
+            _log_interaction(
+                client=client,
+                question=question,
+                answer=answer_text,
+                status_label=status_label,
+                sources=fallback_sources,
+                similarity=None,
+                latency_ms=int((time.perf_counter() - start_time) * 1000),
+                model_name=status_label,
+            )
+            return QAResponse(status=status_label, answer=answer_text, sources=fallback_sources)
 
     if calendar_answer:
         calendar_text = calendar_answer.formatted_answer()
