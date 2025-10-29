@@ -56,7 +56,7 @@ def recent_circulars() -> List[RecentDocument]:
         try:
             result = (
                 client.storage.from_(settings.storage_bucket)
-                .create_signed_url(storage_path, 3600, {"download": True})
+                .create_signed_url(storage_path, 3600)
             )
         except Exception as storage_exc:  # pragma: no cover - network/storage failures
             logger.warning(

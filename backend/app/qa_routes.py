@@ -189,7 +189,7 @@ def _create_signed_url(client, storage_path: str) -> str | None:
         return None
     try:
         result = client.storage.from_(bucket).create_signed_url(
-            storage_path, 3600, {"download": True}
+            storage_path, 3600
         )
     except Exception as exc:  # pragma: no cover - network/storage errors
         logger.warning("Failed to create signed URL for %s: %s", storage_path, exc)

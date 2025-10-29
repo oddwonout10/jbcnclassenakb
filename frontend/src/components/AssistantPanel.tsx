@@ -347,6 +347,13 @@ export function AssistantPanel() {
             </div>
           </div>
         ) : null}
+        {isLoading && conversation.length > 0 ? (
+          <div className="flex items-center gap-3 text-xs font-semibold uppercase tracking-wide text-[#a3adb6]">
+            <span className="h-px flex-1 bg-gradient-to-r from-transparent via-[#d9e3ea] to-[#d9e3ea]/0" />
+            <span>Previous replies</span>
+            <span className="h-px flex-1 bg-gradient-to-l from-transparent via-[#d9e3ea] to-[#d9e3ea]/0" />
+          </div>
+        ) : null}
         {conversationGroups.map((group, groupIndex) => (
           <div key={`group-${groupIndex}`} className="space-y-3">
             {group.map((turn, turnIndex) => (
