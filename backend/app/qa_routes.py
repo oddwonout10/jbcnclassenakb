@@ -36,6 +36,12 @@ from .temporal_context import (
 
 
 logger = logging.getLogger(__name__)
+if logger.level > logging.DEBUG:
+    logger.setLevel(logging.DEBUG)
+
+if logger.handlers:
+    for handler in logger.handlers:
+        handler.setLevel(logging.DEBUG)
 
 
 router = APIRouter(prefix="/qa", tags=["qa"])
@@ -141,6 +147,17 @@ DATE_INTENT_KEYWORDS = {
     "resume": {"resume", "reopen", "reopens", "restart"},
     "end": {"end", "ends", "finish", "finishes", "over", "closing"},
     "start": {"start", "starts", "begin", "begins", "commence", "opens"},
+}
+
+EVENT_KEYWORDS = {
+    "trip",
+    "excursion",
+    "visit",
+    "outing",
+    "camp",
+    "picnic",
+    "competition",
+    "tournament",
 }
 
 
@@ -328,6 +345,243 @@ def _structured_date_lookup(
     return answer, sources, f"structured-date-{date_kind}"
 
 
+def _structured_event_lookup(
+    *,
+    client,
+    keywords: List[str],
+    grade: Optional[str],
+) -> Optional[tuple[str, List[SourceInfo], str]]:
+    lowered_keywords = [token.lower() for token in keywords if token]
+
+    logger.debug(
+        "Structured event lookup start: keywords=%s grade=%s",
+        lowered_keywords,
+        grade,
+    )
+
+    candidates: List[tuple[float, dict, dict, Optional[dt.date], str]] = []
+
+    # Primary pass: document_actions table.
+    action_rows: List[dict] = []
+    try:
+        action_query = (
+            client.table("document_actions")
+            .select(
+                "document_id,description,due_date,audience,confidence,source_excerpt,"
+                "documents(title,published_on,storage_path,original_filename,grade_tags,audience)"
+            )
+            .order("confidence", desc=True)
+        )
+    except Exception as exc:  # pragma: no cover - Supabase errors
+        logger.warning("Structured event action query build failed: %s", exc)
+        action_query = None
+
+    if action_query is not None:
+        if grade:
+            try:
+                action_query = action_query.contains("documents.grade_tags", [grade])
+            except Exception:
+                logger.debug("Structured event action grade filter unsupported; skipping contains")
+
+        try:
+            action_rows = action_query.limit(25).execute().data or []
+        except Exception as exc:  # pragma: no cover - Supabase errors
+            logger.warning("Structured event action query error: %s", exc)
+            action_rows = []
+
+            # Retry without grade filter if the first attempt failed due to query syntax.
+            try:
+                retry_query = (
+                    client.table("document_actions")
+                    .select(
+                        "document_id,description,due_date,audience,confidence,source_excerpt,"
+                        "documents(title,published_on,storage_path,original_filename,grade_tags,audience)"
+                    )
+                    .order("confidence", desc=True)
+                )
+                action_rows = retry_query.limit(25).execute().data or []
+                logger.debug("Structured event action retry rows: %d", len(action_rows))
+            except Exception as retry_exc:  # pragma: no cover - Supabase errors
+                logger.warning("Structured event action retry failed: %s", retry_exc)
+                action_rows = []
+
+    logger.debug("Structured event action rows: %d", len(action_rows))
+
+    for row in action_rows:
+        doc = row.get("documents") or {}
+        description = (row.get("description") or "").lower()
+        doc_title = (doc.get("title") or "").lower()
+
+        match_hits = 0
+        for token in lowered_keywords:
+            if token and (token in description or token in doc_title):
+                match_hits += 1
+
+        if lowered_keywords and match_hits == 0:
+            logger.debug(
+                "Structured event action row skipped (no match): doc_id=%s title=%s",
+                row.get("document_id"),
+                doc.get("title"),
+            )
+            continue
+
+        confidence = float(row.get("confidence") or 0.4)
+        score = confidence + 0.18 * match_hits
+        due_date: Optional[dt.date] = None
+        raw_due = row.get("due_date")
+        if raw_due:
+            try:
+                if isinstance(raw_due, dt.date):
+                    due_date = raw_due
+                else:
+                    due_date = dt.date.fromisoformat(str(raw_due))
+                score += 0.25
+            except Exception:
+                due_date = None
+
+        logger.debug(
+            "Structured event action candidate: doc_id=%s score=%.3f hits=%d due=%s",
+            row.get("document_id"),
+            score,
+            match_hits,
+            due_date,
+        )
+        candidates.append((score, row, doc, due_date, "structured-event"))
+
+    # Secondary pass: document_dates fallback.
+    date_rows: List[dict] = []
+    try:
+        date_query = (
+            client.table("document_dates")
+            .select(
+                "document_id,date_type,date_value,raw_text,confidence,"
+                "documents(title,published_on,storage_path,original_filename,grade_tags,audience)"
+            )
+            .order("confidence", desc=True)
+        )
+    except Exception as exc:  # pragma: no cover - Supabase errors
+        logger.warning("Structured event date query build failed: %s", exc)
+        date_query = None
+
+    if date_query is not None:
+        if grade:
+            try:
+                date_query = date_query.contains("documents.grade_tags", [grade])
+            except Exception:
+                logger.debug("Structured event date grade filter unsupported; skipping contains")
+
+        try:
+            date_rows = date_query.limit(25).execute().data or []
+        except Exception as exc:  # pragma: no cover - Supabase errors
+            logger.warning("Structured event date query error: %s", exc)
+            date_rows = []
+
+            try:
+                retry_query = (
+                    client.table("document_dates")
+                    .select(
+                        "document_id,date_type,date_value,raw_text,confidence,"
+                        "documents(title,published_on,storage_path,original_filename,grade_tags,audience)"
+                    )
+                    .order("confidence", desc=True)
+                )
+                date_rows = retry_query.limit(25).execute().data or []
+                logger.debug("Structured event date retry rows: %d", len(date_rows))
+            except Exception as retry_exc:  # pragma: no cover - Supabase errors
+                logger.warning("Structured event date retry failed: %s", retry_exc)
+                date_rows = []
+
+    logger.debug("Structured event date rows: %d", len(date_rows))
+
+    for row in date_rows:
+        raw_text = (row.get("raw_text") or "").lower()
+        doc = row.get("documents") or {}
+        doc_title = (doc.get("title") or "").lower()
+
+        match_hits = 0
+        for token in lowered_keywords:
+            if token and (token in raw_text or token in doc_title):
+                match_hits += 1
+
+        if lowered_keywords and match_hits == 0:
+            logger.debug(
+                "Structured event date row skipped (no match): doc_id=%s title=%s raw=%s",
+                row.get("document_id"),
+                doc.get("title"),
+                row.get("raw_text"),
+            )
+            continue
+
+        raw_date = row.get("date_value")
+        try:
+            if isinstance(raw_date, dt.date):
+                date_obj = raw_date
+            else:
+                date_obj = dt.date.fromisoformat(str(raw_date))
+        except Exception:
+            logger.debug(
+                "Structured event date row skipped (bad date): doc_id=%s raw=%s",
+                row.get("document_id"),
+                raw_date,
+            )
+            continue
+
+        confidence = float(row.get("confidence") or 0.4)
+        score = confidence + 0.15 * match_hits
+        if (row.get("date_type") or "").lower() in {"start", "deadline"}:
+            score += 0.1
+
+        logger.debug(
+            "Structured event date candidate: doc_id=%s score=%.3f hits=%d date=%s",
+            row.get("document_id"),
+            score,
+            match_hits,
+            date_obj,
+        )
+        candidates.append((score, row, doc, date_obj, "structured-event-date"))
+
+    if not candidates:
+        logger.debug("Structured event lookup finished: no candidates")
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_row, doc, event_date, tag = candidates[0]
+
+    logger.debug(
+        "Structured event lookup selected: doc_id=%s title=%s score=%.3f tag=%s",
+        best_row.get("document_id"),
+        (doc or {}).get("title"),
+        best_score,
+        tag,
+    )
+
+    subject = doc.get("title") or "This circular"
+    if "description" in best_row:
+        description = (best_row.get("description") or "").strip()
+    else:
+        description = (best_row.get("raw_text") or "the event").strip()
+
+    desc_clause = description.rstrip(".") or "the event"
+    formatted_due: Optional[str] = None
+    if event_date:
+        try:
+            formatted_due = format_date(event_date)
+        except Exception:
+            formatted_due = None
+
+    if formatted_due:
+        answer = f"{subject} notes {desc_clause} on {formatted_due}."
+    else:
+        answer = f"{subject} notes {desc_clause}."
+
+    sources = [_source_info_from_documents_row(client, best_row, doc)]
+    document_id = best_row.get("document_id")
+    if document_id:
+        sources[0].document_id = str(document_id)
+
+    return answer, sources, "structured-event"
+
+
 def _structured_contact_lookup(
     *,
     client,
@@ -440,6 +694,12 @@ def _lookup_structured_fact(
             return result, date_intent
         return None, date_intent
 
+    if any(keyword in lowered for keyword in EVENT_KEYWORDS):
+        result = _structured_event_lookup(client=client, keywords=keywords, grade=grade)
+        if result:
+            return result, "event"
+        return None, "event"
+
     contact_role = _infer_contact_role(lowered)
     if contact_role:
         result = _structured_contact_lookup(client=client, keywords=keywords, role=contact_role, grade=grade)
@@ -463,6 +723,12 @@ def _structured_intent_fallback(question: str, intent_label: Optional[str] = Non
             "Please check the latest circular or ask the class parent for confirmation."
         )
         return answer, [], "no-structured-date"
+    if intent_label == "event" or any(word in lowered for word in EVENT_KEYWORDS):
+        answer = (
+            "I couldn't find an event in the circulars that matches your question. "
+            "Please review the latest field trip or excursion circular for details."
+        )
+        return answer, [], "no-structured-event"
     return None
 
 def _append_circular_suggestions(
@@ -494,6 +760,48 @@ def _fetch_document_metadata(client, document_ids: List[str]) -> Dict[str, dict]
     for row in response.data or []:
         metadata[row["id"]] = row
     return metadata
+
+
+def _fetch_chunks_for_document(
+    client,
+    suggestion: SourceInfo,
+    *,
+    limit: int = 3,
+) -> List[ChunkHit]:
+    try:
+        response = (
+            client.table("document_chunks")
+            .select(
+                "document_id,chunk_index,content,published_on,page_number,section_heading"
+            )
+            .eq("document_id", suggestion.document_id)
+            .order("chunk_index")
+            .limit(limit)
+            .execute()
+        )
+    except Exception as exc:  # pragma: no cover - Supabase errors
+        logger.warning("Failed to fetch chunks for suggested document %s: %s", suggestion.document_id, exc)
+        return []
+
+    hits: List[ChunkHit] = []
+    for row in response.data or []:
+        published_on = rag_parse_date(row.get("published_on"))
+        hits.append(
+            ChunkHit(
+                document_id=suggestion.document_id,
+                chunk_index=row.get("chunk_index") or 0,
+                content=row.get("content") or "",
+                similarity=0.55,
+                document_title=suggestion.title or "Suggested document",
+                original_filename=suggestion.original_filename or "",
+                published_on=published_on,
+                storage_path=suggestion.storage_path or "",
+                score=0.55,
+                page_number=row.get("page_number"),
+                section_heading=row.get("section_heading"),
+            )
+        )
+    return hits
 
 
 def _fetch_keyword_hits(client, question: str, limit: int) -> List[ChunkHit]:
@@ -537,10 +845,17 @@ def _fetch_keyword_hits(client, question: str, limit: int) -> List[ChunkHit]:
 
 
 def _fetch_document_fuzzy(client, question: str, limit: int) -> List[SourceInfo]:
+    keywords = _extract_structured_keywords(question, limit=8)
+    if keywords:
+        fuzzy_query = " | ".join(keywords)
+    else:
+        # fall back to literal phrase but strip problematic chars
+        fuzzy_query = re.sub(r"[^A-Za-z0-9\s]", " ", question)
+        fuzzy_query = re.sub(r"\s+", " ", fuzzy_query).strip()
     try:
         response = client.rpc(
             "match_documents_fuzzy",
-            {"q": question, "limit_count": limit},
+            {"q": fuzzy_query, "limit_count": limit},
         ).execute()
     except Exception as exc:  # pragma: no cover - Supabase RPC failure
         logger.warning("Document search RPC failed: %s", exc)
@@ -563,6 +878,47 @@ def _fetch_document_fuzzy(client, question: str, limit: int) -> List[SourceInfo]
                 similarity=float(row.get("similarity") or 0.0),
             )
         )
+    if sources:
+        return sources
+
+    wildcard_tokens = [token for token in keywords if len(token) >= 3]
+    try:
+        query = (
+            client.table("documents")
+            .select("id,title,published_on,original_filename,storage_path")
+            .order("published_on", desc=True)
+            .limit(limit)
+        )
+        if wildcard_tokens:
+            filters = [f"title.ilike.%{token}%" for token in wildcard_tokens]
+            query = query.or_(",".join(filters))
+        else:
+            sanitized = re.sub(r"[^A-Za-z0-9\s]", " ", question)
+            sanitized = re.sub(r"\s+", " ", sanitized).strip()
+            if sanitized:
+                query = query.ilike("title", f"%{sanitized}%")
+        response = query.execute()
+    except Exception as exc:  # pragma: no cover - Supabase errors
+        logger.warning("Document substring search failed: %s", exc)
+        return []
+
+    for row in response.data or []:
+        doc_id = row.get("id")
+        if not doc_id:
+            continue
+        storage_path = row.get("storage_path") or ""
+        sources.append(
+            SourceInfo(
+                document_id=doc_id,
+                title=row.get("title") or "Untitled document",
+                published_on=row.get("published_on"),
+                original_filename=row.get("original_filename") or "",
+                signed_url=_create_signed_url(client, storage_path),
+                storage_path=storage_path,
+                similarity=0.35,
+            )
+        )
+
     return sources
 
 
@@ -1044,22 +1400,19 @@ def answer_question(
 
     structured_result, structured_intent = structured_lookup
     if structured_result:
-        structured_answer, structured_sources, model_name = structured_result
-        sources = _dedupe_sources(structured_sources[:])
-        answer_text = structured_answer
-        _log_interaction(
-            client=client,
-            question=question,
-            answer=answer_text,
-            status_label="answered",
-            sources=sources,
-            similarity=None,
-            latency_ms=int((time.perf_counter() - start_time) * 1000),
-            model_name=model_name,
-        )
-        return QAResponse(status="answered", answer=answer_text, sources=sources)
+        print("[QA][structured] result found", structured_result[2])
+    else:
+        print("[QA][structured] no structured result (intent=", structured_intent, ")")
+    structured_answer_text: Optional[str] = None
+    structured_sources: List[SourceInfo] = []
+    structured_model_name: Optional[str] = None
 
-    if structured_intent:
+    if structured_result:
+        structured_answer_text, structured_sources_raw, structured_model_name = structured_result
+        structured_sources = _dedupe_sources(structured_sources_raw[:])
+
+
+    if not structured_result and structured_intent:
         fallback = _structured_intent_fallback(question, intent_label=structured_intent)
         if fallback:
             answer_text, fallback_sources, status_label = fallback
@@ -1075,7 +1428,7 @@ def answer_question(
             )
             return QAResponse(status=status_label, answer=answer_text, sources=fallback_sources)
 
-    if calendar_answer:
+    if calendar_answer and not structured_result:
         calendar_text = calendar_answer.formatted_answer()
         calendar_source = SourceInfo(
             document_id=f"calendar:{calendar_answer.event_id}",
@@ -1133,7 +1486,15 @@ def answer_question(
         _send_escalation_email(settings, payload, "Knowledge base unreachable (network/Supabase error).")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Knowledge base temporarily unavailable") from exc
 
+    print(
+        "[QA][retrieval] vector hits:",
+        len(hits),
+        "top sim:",
+        hits[0].similarity if hits else None,
+    )
+
     keyword_hits = _fetch_keyword_hits(client, question, settings.qa_max_chunks)
+    print("[QA][retrieval] keyword hits:", len(keyword_hits))
     if keyword_hits:
         keyed_hits: Dict[tuple[str, int], ChunkHit] = {
             (hit.document_id, hit.chunk_index): hit for hit in hits
@@ -1178,6 +1539,7 @@ def answer_question(
         )
 
     manual_entries = match_manual_facts(question)
+    print("[QA][retrieval] manual facts:", len(manual_entries))
     for title, content in manual_entries:
         manual_id = f"manual:{title.lower().replace(' ', '-')[:40]}"
         hits.append(
@@ -1193,12 +1555,70 @@ def answer_question(
             )
         )
 
+    if structured_answer_text:
+        primary_source = structured_sources[0] if structured_sources else None
+        struct_doc_id = (primary_source.document_id if primary_source else "structured:event")
+        published_on = rag_parse_date(primary_source.published_on) if primary_source and primary_source.published_on else None
+        hits.append(
+            ChunkHit(
+                document_id=struct_doc_id,
+                chunk_index=-1,
+                content=structured_answer_text,
+                similarity=0.97,
+                document_title=primary_source.title if primary_source else "Structured fact",
+                original_filename=primary_source.original_filename if primary_source else "structured",
+                published_on=published_on,
+                storage_path=primary_source.storage_path if primary_source else "",
+                score=0.97,
+            )
+        )
+
     doc_ids: List[str] = []
     for hit in hits:
         if hit.document_id.startswith("manual:") or hit.document_id.startswith("calendar:"):
             continue
         doc_ids.append(hit.document_id)
+    print("[QA][retrieval] metadata ids:", len(set(doc_ids)))
     doc_meta = _fetch_document_metadata(client, list({*doc_ids}))
+
+    if doc_suggestions:
+        print("[QA][retrieval] doc suggestions:", [(s.document_id, s.title) for s in doc_suggestions])
+        added_hits = 0
+        for suggestion in doc_suggestions:
+            if suggestion.document_id in doc_ids:
+                continue
+            suggestion_hits = _fetch_chunks_for_document(client, suggestion, limit=2)
+            if not suggestion_hits:
+                continue
+            hits.extend(suggestion_hits)
+            doc_meta.setdefault(
+                suggestion.document_id,
+                {
+                    "id": suggestion.document_id,
+                    "title": suggestion.title,
+                    "published_on": suggestion.published_on,
+                    "grade_tags": [],
+                    "event_tags": [],
+                    "audience": [],
+                },
+            )
+            added_hits += len(suggestion_hits)
+            if added_hits >= 4:
+                break
+        if added_hits:
+            print("[QA][retrieval] added", added_hits, "hits from doc suggestions")
+
+    if hits:
+        preview = [
+            {
+                "doc_id": hit.document_id,
+                "title": hit.document_title,
+                "similarity": round(hit.similarity, 3),
+                "score": round(getattr(hit, "score", hit.similarity), 3),
+            }
+            for hit in hits[:6]
+        ]
+        print("[QA][retrieval] top hits preview:", preview)
 
     if hits:
         hits.sort(
@@ -1293,11 +1713,20 @@ def answer_question(
         return QAResponse(status="escalated", answer=answer_text, sources=[])
 
     sources = _group_sources(client, hits)
+    if structured_sources:
+        sources = _dedupe_sources(structured_sources + sources)
+
     sources_section = _format_sources_section(sources)
-    if sources_section and sources_section not in model_answer:
-        answer_text = f"{model_answer.strip()}\n\n{sources_section}"
-    else:
-        answer_text = model_answer.strip()
+
+    parts: List[str] = []
+    if structured_answer_text:
+        parts.append(structured_answer_text.strip())
+    parts.append(model_answer.strip())
+
+    answer_text = "\n\n".join(part for part in parts if part)
+
+    if sources_section and sources_section not in answer_text:
+        answer_text = f"{answer_text}\n\n{sources_section}"
 
     _log_interaction(
         client=client,

@@ -225,6 +225,21 @@ def _update_document_structured_fields(document_id: str, data: StructuredDocumen
 def store_structured_metadata(document_id: str, data: StructuredDocumentData) -> None:
     _update_document_structured_fields(document_id, data)
 
+    client = get_supabase_client()
+    for table in (
+        "document_dates",
+        "document_actions",
+        "document_contacts",
+        "document_entities",
+        "document_page_summaries",
+        "document_headings",
+        "document_tables",
+    ):
+        try:
+            client.table(table).delete().eq("document_id", document_id).execute()
+        except Exception as exc:  # pragma: no cover - schema dependent
+            LOGGER.warning("Failed to clear existing structured rows in %s: %s", table, exc)
+
     date_rows = [
         {
             "document_id": document_id,
