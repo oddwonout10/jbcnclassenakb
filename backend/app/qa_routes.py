@@ -1715,6 +1715,7 @@ def answer_question(
     sources = _group_sources(client, hits)
     if structured_sources:
         sources = _dedupe_sources(structured_sources + sources)
+    sources = sources[:5]
 
     sources_section = _format_sources_section(sources)
 
