@@ -35,8 +35,9 @@ def recent_circulars() -> List[RecentDocument]:
     try:
         timetable_resp = (
             client.table("documents")
-            .select("id,title,original_filename,published_on,storage_path")
+            .select("id,title,original_filename,published_on,uploaded_at,storage_path")
             .eq("original_filename", TIMETABLE_FILENAME)
+            .order("uploaded_at", desc=True)
             .order("published_on", desc=True)
             .limit(1)
             .execute()
@@ -89,8 +90,9 @@ def recent_circulars() -> List[RecentDocument]:
     try:
         recent_resp = (
             client.table("documents")
-            .select("id,title,original_filename,published_on,storage_path")
+            .select("id,title,original_filename,published_on,uploaded_at,storage_path")
             .neq("original_filename", TIMETABLE_FILENAME)
+            .order("uploaded_at", desc=True)
             .order("published_on", desc=True)
             .limit(5)
             .execute()

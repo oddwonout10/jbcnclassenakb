@@ -132,6 +132,7 @@ def insert_document_record(
     grade_tags: list[str] | None = None,
 ) -> str:
     client = get_supabase_client()
+    now_iso = dt.datetime.utcnow().isoformat()
     payload = {
         "title": title,
         "original_filename": original_filename,
@@ -143,6 +144,7 @@ def insert_document_record(
         "source_sha256": sha256,
         "file_size_bytes": file_size,
         "page_count": page_count,
+        "uploaded_at": now_iso,
     }
     try:
         response = client.table("documents").insert(payload).execute()
