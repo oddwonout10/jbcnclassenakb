@@ -65,11 +65,11 @@ def _guardian_exists(client: Client, student_id: str) -> bool:
 
 def _create_supabase_user(client: Client, email: str, password: str) -> Any:
     try:
-        result = client.auth.admin.create_user(
+        result = client.auth.sign_up(
             {
                 "email": email,
                 "password": password,
-                "email_confirm": True,
+                "options": {"email_confirm": True},
             }
         )
     except Exception as exc:  # pragma: no cover - surfacing auth errors
@@ -96,7 +96,7 @@ def invitation_signup(payload: SignupRequest) -> SignupResponse:
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
 
-    client = get_supabase_client(service_role=True)
+    client = get_supabase_client()
     student = _find_student_by_code(client, canonical_code)
     if not student:
         raise HTTPException(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
+import os
 import re
 import time
 from collections import OrderedDict
@@ -10,6 +11,8 @@ from typing import Dict, List, Optional
 
 SUMMARY_CACHE: Dict[str, tuple[float, str]] = {}
 CACHE_TTL_SECONDS = 24 * 60 * 60
+CACHE_MAX_SIZE = 256
+SUMMARY_CACHE_VERSION = os.getenv("SUMMARY_CACHE_VERSION", "")
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -951,6 +954,11 @@ def _llm_summary_for_document(
         return None
 
     cache_key_seed = f"{primary_source.document_id}:{primary_source.published_on or ''}:{question.strip().lower()}"
+    version = _document_cache_version(client, primary_source.document_id)
+    if SUMMARY_CACHE_VERSION:
+        cache_key_seed = f"{SUMMARY_CACHE_VERSION}:{cache_key_seed}"
+    if version:
+        cache_key_seed = f"{cache_key_seed}:{version}"
     cache_key = hashlib.sha1(cache_key_seed.encode("utf-8"), usedforsecurity=False).hexdigest()
     now = time.time()
     cached = SUMMARY_CACHE.get(cache_key)
@@ -1005,6 +1013,10 @@ def _llm_summary_for_document(
     summary_text = summary_text.strip()
     if not summary_text:
         return None
+
+    if len(SUMMARY_CACHE) >= CACHE_MAX_SIZE:
+        oldest_key = min(SUMMARY_CACHE, key=lambda k: SUMMARY_CACHE[k][0])
+        SUMMARY_CACHE.pop(oldest_key, None)
 
     SUMMARY_CACHE[cache_key] = (now, summary_text)
     return summary_text
@@ -1592,7 +1604,7 @@ def answer_question(
 ) -> QAResponse:
     global _rate_limiter
     start_time = time.perf_counter()
-    client = get_supabase_client(service_role=True)
+    client = get_supabase_client()
 
     if _rate_limiter is None:
         _rate_limiter = RateLimiter(
@@ -2229,3 +2241,20 @@ def answer_question(
     )
 
     return QAResponse(status="answered", answer=answer_text, sources=sources)
+def _document_cache_version(client, document_id: str) -> str:
+    try:
+        response = (
+            client.table("documents")
+            .select("uploaded_at,updated_at")
+            .eq("id", document_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return ""
+
+    rows = response.data or []
+    if not rows:
+        return ""
+    row = rows[0]
+    return row.get("updated_at") or row.get("uploaded_at") or ""

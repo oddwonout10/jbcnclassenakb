@@ -48,3 +48,9 @@ build/
 # Supabase exports
 supabase/.branches
 supabase/.branches/*
+
+# Local data cache
+data/circulars/
+data/Supabase*
+data/Grade 3 JBCN Ena class list.xlsx
+data/circulars.sqlite

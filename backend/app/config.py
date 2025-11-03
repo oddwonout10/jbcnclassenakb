@@ -1,5 +1,4 @@
 from __future__ import annotations
-from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -12,10 +11,12 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT_DIR / ".env"
 
+dotenv_loaded = False
 if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)  # Load project .env once at import time.
-else:
-    load_dotenv()  # Fallback: search upwards from CWD.
+    load_dotenv(ENV_PATH)
+    dotenv_loaded = True
+if not dotenv_loaded:
+    load_dotenv()
 
 
 def _env(name: str, default: str | None = None) -> str:

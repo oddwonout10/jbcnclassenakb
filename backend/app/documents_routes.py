@@ -3,11 +3,62 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from .config import get_settings
 from .supabase_client import get_supabase_client
+
+
+def _guardian_from_token(token: str) -> dict:
+    client = get_supabase_client(service_role=True)
+    try:
+        result = client.auth.get_user(token)
+    except Exception as exc:  # pragma: no cover - auth errors
+        logger.warning("Supabase get_user failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token validation failed.",
+        ) from exc
+
+    user = getattr(result, "user", None)
+    user_id = getattr(user, "id", None)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token validation failed.",
+        )
+
+    guardian_resp = (
+        client.table("guardians")
+        .select("id,student_id,auth_user_id")
+        .eq("auth_user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    guardian_rows = guardian_resp.data or []
+    if not guardian_rows:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Guardian record not found.",
+        )
+    return guardian_rows[0]
+
+
+def _require_guardian(authorization: str | None = Header(default=None)) -> dict:
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header.",
+        )
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization scheme.",
+        )
+    return _guardian_from_token(token)
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +72,12 @@ class RecentDocument(BaseModel):
     title: str
     display_title: str
     published_on: Optional[str]
-    signed_url: Optional[str]
+    download_path: Optional[str]
     is_timetable: bool = False
 
 
 @router.get("/recent", response_model=List[RecentDocument])
-def recent_circulars() -> List[RecentDocument]:
+def recent_circulars(_guardian: dict = Depends(_require_guardian)) -> List[RecentDocument]:
     settings = get_settings()
     client = get_supabase_client(service_role=True)
 
@@ -51,29 +102,6 @@ def recent_circulars() -> List[RecentDocument]:
 
     timetable_rows = timetable_resp.data or []
 
-    def _signed_url(storage_path: str | None) -> Optional[str]:
-        if not storage_path:
-            return None
-        try:
-            result = (
-                client.storage.from_(settings.storage_bucket)
-                .create_signed_url(storage_path, 3600, {"download": True})
-            )
-        except Exception as storage_exc:  # pragma: no cover - network/storage failures
-            logger.warning(
-                "Failed to create signed URL for %s: %s", storage_path, storage_exc
-            )
-            return None
-
-        payload = None
-        if isinstance(result, dict):
-            payload = result
-        elif hasattr(result, "data"):
-            payload = getattr(result, "data") or {}
-        if isinstance(payload, dict):
-            return payload.get("signedURL") or payload.get("signedUrl")
-        return None
-
     if timetable_rows:
         doc = timetable_rows[0]
         documents.append(
@@ -82,7 +110,7 @@ def recent_circulars() -> List[RecentDocument]:
                 title=doc.get("title") or "Grade 3 Ena time table",
                 display_title="Grade 3 Ena time table",
                 published_on=doc.get("published_on"),
-                signed_url=_signed_url(doc.get("storage_path")),
+                download_path=f"/documents/{doc['id']}/file",
                 is_timetable=True,
             )
         )
@@ -111,7 +139,7 @@ def recent_circulars() -> List[RecentDocument]:
                 title=row.get("title") or row.get("original_filename") or "Untitled circular",
                 display_title=row.get("title") or row.get("original_filename") or "Untitled circular",
                 published_on=row.get("published_on"),
-                signed_url=_signed_url(row.get("storage_path")),
+                download_path=f"/documents/{row['id']}/file",
             )
         )
 
@@ -123,3 +151,66 @@ def recent_circulars() -> List[RecentDocument]:
             documents = documents[:5]
 
     return documents
+
+
+@router.get("/{document_id}/file")
+def fetch_document_file(document_id: str, access_token: str | None = Query(default=None)):
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing access token.",
+        )
+
+    _guardian_from_token(access_token)
+
+    settings = get_settings()
+    client = get_supabase_client(service_role=True)
+
+    doc_resp = (
+        client.table("documents")
+        .select("storage_path,original_filename")
+        .eq("id", document_id)
+        .limit(1)
+        .execute()
+    )
+    doc_rows = doc_resp.data or []
+    if not doc_rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    storage_path = doc_rows[0].get("storage_path")
+    if not storage_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    try:
+        result = client.storage.from_(settings.storage_bucket).create_signed_url(
+            storage_path, 3600, {"download": False}
+        )
+    except Exception as exc:  # pragma: no cover - storage errors
+        logger.warning("Failed to create signed URL for %s: %s", storage_path, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to create download link.",
+        ) from exc
+
+    payload = None
+    if isinstance(result, dict):
+        payload = result
+    elif hasattr(result, "data"):
+        payload = getattr(result, "data") or {}
+
+    signed_url = None
+    if isinstance(payload, dict):
+        signed_url = payload.get("signedURL") or payload.get("signedUrl")
+
+    if not signed_url:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Download link was empty.",
+        )
+
+    if not signed_url.startswith("http"):
+        base_url = settings.supabase_url.rstrip("/")
+        path = signed_url if signed_url.startswith("/") else f"/{signed_url}"
+        signed_url = f"{base_url}{path}"
+
+    return RedirectResponse(url=signed_url)

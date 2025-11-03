@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
 
 type CircularItem = {
   id: string;
   title: string;
   displayTitle: string;
   publishedOn?: string | null;
-  signedUrl?: string | null;
+  downloadPath?: string | null;
   isTimetable?: boolean;
 };
 
@@ -30,6 +31,7 @@ export function CircularsInfo() {
   const [items, setItems] = useState<CircularItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadCirculars() {
@@ -41,11 +43,27 @@ export function CircularsInfo() {
           throw new Error("Backend URL is not configured.");
         }
 
+        let token: string | null = null;
+        if (supabase) {
+          const { data } = await supabase.auth.getSession();
+          token = data.session?.access_token ?? null;
+          setAccessToken(token);
+        }
+
+        if (!token) {
+          throw new Error("You must be signed in to view circulars.");
+        }
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+
         const response = await fetch(`${backendUrl}/documents/recent`, {
           method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers,
         });
 
         if (!response.ok) {
@@ -58,7 +76,7 @@ export function CircularsInfo() {
           title: string;
           display_title: string;
           published_on?: string | null;
-          signed_url?: string | null;
+          download_path?: string | null;
           is_timetable?: boolean;
         }>;
 
@@ -67,7 +85,7 @@ export function CircularsInfo() {
           title: item.title,
           displayTitle: item.display_title,
           publishedOn: item.published_on ?? null,
-          signedUrl: item.signed_url ?? null,
+          downloadPath: item.download_path ?? null,
           isTimetable: Boolean(item.is_timetable),
         }));
 
@@ -124,16 +142,20 @@ export function CircularsInfo() {
                   <p className="text-base font-semibold text-[#21576f]">
                     {item.displayTitle}
                   </p>
-                  {item.signedUrl ? (
-                    <a
-                      href={item.signedUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded-full bg-[#43c0f6]/10 px-3 py-1 text-xs font-semibold text-[#1f5670] transition hover:bg-[#43c0f6]/20"
-                    >
-                      Download
-                    </a>
-                  ) : null}
+            {backendUrl && item.downloadPath && accessToken ? (
+              <a
+                href={`${backendUrl}${item.downloadPath}?access_token=${encodeURIComponent(accessToken)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-full bg-[#43c0f6]/10 px-3 py-1 text-xs font-semibold text-[#1f5670] transition hover:bg-[#43c0f6]/20"
+              >
+                Download
+              </a>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded-full bg-gray-200 px-3 py-1 text-xs font-semibold text-gray-500">
+                Sign in to download
+              </span>
+            )}
                 </div>
                 {dateLabel ? (
                   <p className="mt-1 text-xs font-medium text-[#4e5d78]">
