@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
-    "prebuild": "python --version && which python && pip --version && pip list",
+    "prebuild": "echo '--- python diagnostics ---' && python --version && which python && pip --version && pip list && echo '--- end python diagnostics ---'",
     "build": "next build --turbopack",
     "start": "next start",
     "lint": "eslint"
