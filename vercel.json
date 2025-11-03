@@ -1,0 +1,19 @@
+{
+  "build": {
+    "env": {
+      "VERCEL_PYTHON_VERSION": "3.11"
+    }
+  },
+  "builds": [
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "frontend/$1"
+    }
+  ]
+}
