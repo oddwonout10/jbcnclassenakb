@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import re
 import time
 from collections import OrderedDict
 from typing import Dict, List, Optional
+
+SUMMARY_CACHE: Dict[str, tuple[float, str]] = {}
+CACHE_TTL_SECONDS = 24 * 60 * 60
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,7 +21,8 @@ from .calendar_events import fetch_calendar_context
 from .calendar_resolver import CalendarAnswer, resolve_calendar_question
 from .llm_client import LLMClientError, generate_answer
 from .manual_context import match_manual_facts
-from .rag import ChunkHit, embed_text, fetch_relevant_chunks, parse_date as rag_parse_date
+from .intent_classifier import IntentLabel, classify_intent
+from .rag import ChunkHit, embed_text, fetch_relevant_chunks, rerank_hits, parse_date as rag_parse_date
 from .supabase_client import get_supabase_client
 from .rate_limiter import RateLimiter
 from .temporal_context import (
@@ -71,6 +76,157 @@ class QAResponse(BaseModel):
     status: str
     answer: str
     sources: List[SourceInfo]
+
+
+def _fetch_document_highlights(client, document_id: str, limit: int = 3) -> List[str]:
+    try:
+        response = (
+            client.table("document_highlights")
+            .select("highlight_index,text,importance")
+            .eq("document_id", document_id)
+            .order("importance", desc=True)
+            .order("highlight_index")
+            .limit(limit)
+            .execute()
+        )
+    except Exception:
+        return []
+
+    rows = response.data or []
+    return [row["text"] for row in rows if row.get("text")]
+
+
+def _fetch_first_chunk_snippet(client, document_id: str) -> Optional[str]:
+    try:
+        response = (
+            client.table("document_chunks")
+            .select("content")
+            .eq("document_id", document_id)
+            .order("chunk_index")
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return None
+
+    rows = response.data or []
+    if not rows:
+        return None
+    content = rows[0].get("content") or ""
+    cleaned = content.strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.replace("\n", " ")
+    if len(cleaned) > 280:
+        cleaned = cleaned[:277].rsplit(" ", 1)[0] + "…"
+    return cleaned
+
+
+def _fetch_documents_by_keyword(
+    client,
+    keyword: str,
+    *,
+    limit: int = 3,
+) -> List[dict]:
+    try:
+        query = (
+            client.table("documents")
+            .select("id,title,published_on,original_filename,storage_path,doc_type")
+            .order("published_on", desc=True)
+            .limit(limit)
+        )
+        query = query.ilike("title", f"%{keyword}%")
+        response = query.execute()
+    except Exception as exc:
+        logger.warning("Failed to fetch documents by keyword %s: %s", keyword, exc)
+        return []
+    return response.data or []
+
+
+def _make_source_info(client, doc: dict, similarity: float = 1.0) -> SourceInfo:
+    storage_path = doc.get("storage_path") or ""
+    return SourceInfo(
+        document_id=doc.get("id"),
+        title=doc.get("title") or "Circular",
+        published_on=doc.get("published_on"),
+        original_filename=doc.get("original_filename") or "",
+        signed_url=_create_signed_url(client, storage_path),
+        storage_path=storage_path,
+        similarity=similarity,
+    )
+
+
+def _answer_ranking_question(
+    *,
+    client,
+    question: str,
+    settings: Settings,
+    start_time: float,
+) -> Optional[QAResponse]:
+    ranking_docs = _fetch_documents_by_keyword(client, "rank", limit=5)
+    if not ranking_docs:
+        return None
+
+    primary_docs: List[dict] = []
+    secondary_docs: List[dict] = []
+    for doc in ranking_docs:
+        title = (doc.get("title") or "").lower()
+        if "rank" in title:
+            primary_docs.append(doc)
+        else:
+            secondary_docs.append(doc)
+
+    if not primary_docs and secondary_docs:
+        primary_docs = secondary_docs[:2]
+
+    if not primary_docs:
+        return None
+
+    answer_lines: List[str] = []
+    sources: List[SourceInfo] = []
+
+    for index, doc in enumerate(primary_docs[:3], start=1):
+        highlights = _fetch_document_highlights(client, doc["id"], limit=3)
+        snippet = None
+        if not highlights:
+            snippet = _fetch_first_chunk_snippet(client, doc["id"])
+
+        published = doc.get("published_on")
+        if published:
+            try:
+                date_label = format_date(dt.date.fromisoformat(published))
+            except Exception:
+                date_label = published
+        else:
+            date_label = "Recently"
+
+        lines: List[str] = []
+        lines.append(
+            f"{index}. {doc.get('title') or 'Ranking update'} — published {date_label}."
+        )
+        for bullet in highlights:
+            lines.append(f"   • {bullet.strip()}")
+        if not highlights and snippet:
+            lines.append(f"   • {snippet}")
+
+        answer_lines.extend(lines)
+        sources.append(_make_source_info(client, doc))
+
+    if not answer_lines:
+        return None
+
+    answer_text = "Ranking update highlights:\n" + "\n".join(answer_lines)
+    _log_interaction(
+        client=client,
+        question=question,
+        answer=answer_text,
+        status_label="answered",
+        sources=sources,
+        similarity=None,
+        latency_ms=int((time.perf_counter() - start_time) * 1000),
+        model_name="deterministic-ranking",
+    )
+    return QAResponse(status="answered", answer=answer_text, sources=sources)
 
 
 SCHEDULE_TERMS = {
@@ -188,9 +344,7 @@ def _create_signed_url(client, storage_path: str) -> str | None:
         logger.warning("Error checking existence of %s: %s", storage_path, exc)
         return None
     try:
-        result = client.storage.from_(bucket).create_signed_url(
-            storage_path, 3600, {"download": True}
-        )
+        result = client.storage.from_(bucket).create_signed_url(storage_path, 3600, {"download": False})
     except Exception as exc:  # pragma: no cover - network/storage errors
         logger.warning("Failed to create signed URL for %s: %s", storage_path, exc)
         return None
@@ -678,6 +832,264 @@ def _dedupe_sources(sources: List[SourceInfo]) -> List[SourceInfo]:
     return unique
 
 
+def _sanitize_highlight(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    cleaned = text.replace("|", " ")
+    cleaned = re.sub(r"\b(table|column|row|header)\b[:]?", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(.)\1{2,}", r"\1\1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if not cleaned:
+        return None
+
+    tokens: list[str] = []
+    seen_tokens: set[str] = set()
+    prev_norm = ""
+    for token in cleaned.split():
+        norm = re.sub(r"[^a-z0-9]", "", token.lower())
+        if not norm:
+            continue
+        if norm == prev_norm:
+            continue
+        if norm.isalpha() and len(norm) > 4:
+            if norm in seen_tokens:
+                prev_norm = norm
+                continue
+            seen_tokens.add(norm)
+        prev_norm = norm
+        tokens.append(token)
+
+    if not tokens or len(tokens) < 4:
+        return None
+
+    cleaned_text = " ".join(tokens)
+    if len(cleaned_text) > 240:
+        cleaned_text = cleaned_text[:237].rsplit(" ", 1)[0] + "…"
+    return cleaned_text
+
+
+def _is_table_only_chunk(text: str) -> bool:
+    if not text:
+        return True
+
+    stripped = text.strip()
+    if not stripped:
+        return True
+
+    pipe_count = stripped.count("|")
+    total_chars = len(stripped)
+    alpha_numeric = sum(1 for ch in stripped if ch.isalnum())
+
+    if pipe_count >= 3 and alpha_numeric / max(total_chars, 1) < 0.35:
+        return True
+
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if not lines:
+        return True
+
+    table_like_lines = 0
+    for line in lines:
+        if re.fullmatch(r"(table\s*:)?\s*[A-Z0-9\s\-\|:]+", line, flags=re.IGNORECASE):
+            table_like_lines += 1
+
+    if table_like_lines == len(lines):
+        return True
+
+    return False
+
+
+def _summarise_snippet(snippet: str) -> Optional[str]:
+    if not snippet:
+        return None
+    text = snippet.replace("|", " ")
+    text = re.sub(r"\b(table|column|row|header)\b[:]?", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(.)\1{2,}", r"\1\1", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    segments: list[str] = []
+    for line in lines:
+        parts = re.split(r"(?<=[.!?])\s+", line)
+        for part in parts:
+            part = part.strip()
+            if part:
+                segments.append(re.sub(r"\s+", " ", part))
+
+    if not segments:
+        return None
+
+    informative: list[str] = []
+    keywords = re.compile(
+        r"\b(day|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|grade|trip|arrive|depart|return)\b|\d",
+        re.IGNORECASE,
+    )
+
+    for seg in segments:
+        if keywords.search(seg):
+            informative.append(seg)
+        if len(informative) >= 2:
+            break
+
+    if not informative:
+        informative = segments[:2]
+
+    summary = " ".join(informative).strip()
+    if len(summary) > 240:
+        summary = summary[:237].rsplit(" ", 1)[0] + "…"
+    return summary or None
+
+
+def _llm_summary_for_document(
+    *,
+    client,
+    question: str,
+    primary_source: SourceInfo,
+    settings: Settings,
+    max_chunks: int = 4,
+) -> Optional[str]:
+    if max_chunks <= 0:
+        return None
+
+    cache_key_seed = f"{primary_source.document_id}:{primary_source.published_on or ''}:{question.strip().lower()}"
+    cache_key = hashlib.sha1(cache_key_seed.encode("utf-8"), usedforsecurity=False).hexdigest()
+    now = time.time()
+    cached = SUMMARY_CACHE.get(cache_key)
+    if cached and now - cached[0] < CACHE_TTL_SECONDS:
+        return cached[1]
+
+    chunk_hits = _fetch_chunks_for_document(client, primary_source, limit=max_chunks)
+    if not chunk_hits:
+        return None
+
+    excerpts: list[str] = []
+    for idx, chunk in enumerate(chunk_hits[:max_chunks], start=1):
+        content = (chunk.content or "").strip()
+        if not content:
+            continue
+        if len(content) > 600:
+            content = content[:600].rsplit(" ", 1)[0] + "…"
+        meta_parts: list[str] = []
+        if chunk.section_heading:
+            meta_parts.append(chunk.section_heading.strip())
+        if chunk.page_number:
+            meta_parts.append(f"Page {chunk.page_number}")
+        prefix = f"{idx}. "
+        if meta_parts:
+            prefix += "(" + "; ".join(meta_parts) + ") "
+        excerpts.append(prefix + content)
+
+    if not excerpts:
+        return None
+
+    prompt = (
+        "You are summarizing a school circular for parents.\n"
+        f"Question: {question.strip()}\n"
+        "Use the excerpts below (ignore table headers or formatting artifacts).\n"
+        "Excerpts:\n"
+        + "\n\n".join(excerpts)
+        + "\n\nReply with two short sentences that answer the question, mention specific dates/times, and avoid repeating headings. Do not invent details."
+    )
+
+    try:
+        summary_text, _model = generate_answer(prompt, settings)
+    except LLMClientError as exc:
+        logger.debug("LLM summary skipped for %s: %s", primary_source.document_id, exc)
+        return None
+    except Exception:  # pragma: no cover - unexpected provider issues
+        logger.exception("LLM summary generation failed")
+        return None
+
+    if not summary_text:
+        return None
+
+    summary_text = summary_text.strip()
+    if not summary_text:
+        return None
+
+    SUMMARY_CACHE[cache_key] = (now, summary_text)
+    return summary_text
+
+
+STRUCTURED_DETERMINISTIC_TAGS = {
+    "structured-contact",
+    "structured-event",
+    "structured-date-deadline",
+    "structured-date-resume",
+    "structured-date-end",
+    "structured-date-start",
+}
+
+
+def _build_structured_answer_response(
+    *,
+    client,
+    question: str,
+    answer_text: str,
+    sources: List[SourceInfo],
+    doc_suggestions: List[SourceInfo],
+    start_time: float,
+    settings: Settings,
+    payload: QARequest,
+    tag: str,
+) -> QAResponse:
+    parts: List[str] = [answer_text.strip()]
+    all_sources = _dedupe_sources(list(sources))
+
+    primary_source = next(
+        (
+            src
+            for src in all_sources
+            if src.document_id and not src.document_id.startswith(("calendar:", "manual:"))
+        ),
+        None,
+    )
+
+    if primary_source and primary_source.document_id:
+        llm_summary = _llm_summary_for_document(
+            client=client,
+            question=question,
+            primary_source=primary_source,
+            settings=settings,
+        )
+        if llm_summary:
+            parts.append(f"Summary: {llm_summary}")
+
+        highlights = _fetch_document_highlights(client, primary_source.document_id, limit=3)
+        cleaned_highlights: List[str] = []
+        for bullet in highlights or []:
+            sanitised = _sanitize_highlight(bullet)
+            if sanitised:
+                cleaned_highlights.append(sanitised)
+
+        if cleaned_highlights and llm_summary:
+            cleaned_highlights = cleaned_highlights[:2]
+
+        if cleaned_highlights:
+            parts.append("Highlights:")
+            parts.extend(f"- {item}" for item in cleaned_highlights)
+        elif not llm_summary:
+            snippet = _fetch_first_chunk_snippet(client, primary_source.document_id)
+            summary = _summarise_snippet(snippet or "")
+            if summary:
+                parts.append(f"Summary: {summary}")
+
+    _append_circular_suggestions(parts, all_sources, doc_suggestions)
+    all_sources = _dedupe_sources(all_sources)
+
+    final_answer = "\n\n".join(parts)
+    _log_interaction(
+        client=client,
+        question=question,
+        answer=final_answer,
+        status_label="answered",
+        sources=all_sources,
+        similarity=None,
+        latency_ms=int((time.perf_counter() - start_time) * 1000),
+        model_name=tag,
+    )
+    return QAResponse(status="answered", answer=final_answer, sources=all_sources)
+
+
 def _lookup_structured_fact(
     *,
     client,
@@ -741,7 +1153,23 @@ def _append_circular_suggestions(
     if not document_sources:
         return
 
-    limited_docs = document_sources[:limit]
+    existing_ids = {src.document_id for src in sources if src.document_id}
+    seen_suggestions: set[str] = set()
+    limited_docs: List[SourceInfo] = []
+    for suggestion in document_sources:
+        doc_id = suggestion.document_id
+        if not doc_id:
+            continue
+        if doc_id in existing_ids or doc_id in seen_suggestions:
+            continue
+        limited_docs.append(suggestion)
+        seen_suggestions.add(doc_id)
+        if len(limited_docs) >= limit:
+            break
+
+    if not limited_docs:
+        return
+
     doc_lines = "\n".join(f"- {doc.title}" for doc in limited_docs)
     parts.append(f"Circulars:\n{doc_lines}")
     sources.extend(limited_docs)
@@ -768,6 +1196,8 @@ def _fetch_chunks_for_document(
     *,
     limit: int = 3,
 ) -> List[ChunkHit]:
+    fetch_limit = max(limit * 3, limit + 4)
+    fetch_limit = min(fetch_limit, 20)
     try:
         response = (
             client.table("document_chunks")
@@ -776,72 +1206,75 @@ def _fetch_chunks_for_document(
             )
             .eq("document_id", suggestion.document_id)
             .order("chunk_index")
-            .limit(limit)
+            .limit(fetch_limit)
             .execute()
         )
     except Exception as exc:  # pragma: no cover - Supabase errors
         logger.warning("Failed to fetch chunks for suggested document %s: %s", suggestion.document_id, exc)
         return []
 
-    hits: List[ChunkHit] = []
-    for row in response.data or []:
+    filtered_hits: List[ChunkHit] = []
+    fallback_hits: List[ChunkHit] = []
+    seen_signatures: set[str] = set()
+    rows = response.data or []
+    for row in rows:
         published_on = rag_parse_date(row.get("published_on"))
-        hits.append(
+        content = row.get("content") or ""
+        chunk = ChunkHit(
+            document_id=suggestion.document_id,
+            chunk_index=row.get("chunk_index") or 0,
+            content=content,
+            similarity=0.55,
+            document_title=suggestion.title or "Suggested document",
+            original_filename=suggestion.original_filename or "",
+            published_on=published_on,
+            storage_path=suggestion.storage_path or "",
+            score=0.55,
+            page_number=row.get("page_number"),
+            section_heading=row.get("section_heading"),
+        )
+
+        signature = re.sub(r"\s+", " ", content).strip().lower()
+        if not signature:
+            continue
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+
+        if _is_table_only_chunk(content):
+            fallback_hits.append(chunk)
+            continue
+
+        filtered_hits.append(chunk)
+        if len(filtered_hits) >= limit:
+            break
+
+    if len(filtered_hits) < limit:
+        for chunk in fallback_hits:
+            filtered_hits.append(chunk)
+            if len(filtered_hits) >= limit:
+                break
+
+    if not filtered_hits and rows:
+        first_row = rows[0]
+        filtered_hits.append(
             ChunkHit(
                 document_id=suggestion.document_id,
-                chunk_index=row.get("chunk_index") or 0,
-                content=row.get("content") or "",
+                chunk_index=first_row.get("chunk_index") or 0,
+                content=first_row.get("content") or "",
                 similarity=0.55,
                 document_title=suggestion.title or "Suggested document",
                 original_filename=suggestion.original_filename or "",
-                published_on=published_on,
+                published_on=rag_parse_date(first_row.get("published_on")),
                 storage_path=suggestion.storage_path or "",
                 score=0.55,
-                page_number=row.get("page_number"),
-                section_heading=row.get("section_heading"),
+                page_number=first_row.get("page_number"),
+                section_heading=first_row.get("section_heading"),
             )
         )
-    return hits
 
+    return filtered_hits
 
-def _fetch_keyword_hits(client, question: str, limit: int) -> List[ChunkHit]:
-    try:
-        response = client.rpc(
-            "match_document_chunks_fuzzy",
-            {"q": question, "limit_count": limit},
-        ).execute()
-    except Exception as exc:  # pragma: no cover - Supabase RPC failure
-        logger.warning("Keyword search RPC failed: %s", exc)
-        return []
-
-    rows = response.data or []
-    hits: List[ChunkHit] = []
-    for row in rows:
-        document_id = row.get("document_id")
-        if not document_id:
-            continue
-        chunk_index = row.get("chunk_index") or 0
-        content = row.get("content") or ""
-        similarity_raw = row.get("similarity")
-        try:
-            similarity = float(similarity_raw)
-        except (TypeError, ValueError):
-            similarity = 0.0
-        published_on = rag_parse_date(row.get("published_on"))
-        hits.append(
-            ChunkHit(
-                document_id=document_id,
-                chunk_index=chunk_index,
-                content=content,
-                similarity=similarity,
-                document_title=row.get("document_title") or row.get("title") or "Untitled",
-                original_filename=row.get("original_filename") or "",
-                published_on=published_on,
-                storage_path=row.get("storage_path") or "",
-                score=similarity,
-            )
-        )
-    return hits
 
 
 def _fetch_document_fuzzy(client, question: str, limit: int) -> List[SourceInfo]:
@@ -1193,6 +1626,56 @@ def answer_question(
                 detail="Verification failed. Please try again.",
             )
 
+    intent_result = classify_intent(question)
+    if intent_result.label == IntentLabel.WEATHER:
+        answer_text = (
+            "I’m not able to check live weather conditions. Please use your preferred weather app "
+            "for the latest forecast, and reach out to the class parent if there’s a school update you need."
+        )
+        _log_interaction(
+            client=client,
+            question=question,
+            answer=answer_text,
+            status_label="unsupported",
+            sources=[],
+            similarity=None,
+            latency_ms=int((time.perf_counter() - start_time) * 1000),
+            model_name="intent-guard",
+        )
+        return QAResponse(status="unsupported", answer=answer_text, sources=[])
+
+    if intent_result.label == IntentLabel.WELLNESS:
+        answer_text = (
+            "I’m here to share school updates, but for personal wellbeing support please reach out to the class parent "
+            "or a trusted adult right away. I’ve alerted the class parent so they can connect with you directly."
+        )
+        _log_interaction(
+            client=client,
+            question=question,
+            answer=answer_text,
+            status_label="escalated",
+            sources=[],
+            similarity=None,
+            latency_ms=int((time.perf_counter() - start_time) * 1000),
+            model_name="intent-guard",
+        )
+        _send_escalation_email(
+            settings,
+            payload,
+            "Wellness support request detected by intent guard.",
+        )
+        return QAResponse(status="escalated", answer=answer_text, sources=[])
+
+    if intent_result.label == IntentLabel.RANKING:
+        ranking_response = _answer_ranking_question(
+            client=client,
+            question=question,
+            settings=settings,
+            start_time=start_time,
+        )
+        if ranking_response:
+            return ranking_response
+
     now_ist = current_ist()
     temporal_hints: List[str] = [f"Today is {format_date(now_ist.date())} (IST)."]
     date_references = infer_date_references(question, now_ist)
@@ -1410,7 +1893,19 @@ def answer_question(
     if structured_result:
         structured_answer_text, structured_sources_raw, structured_model_name = structured_result
         structured_sources = _dedupe_sources(structured_sources_raw[:])
-
+        if structured_model_name in STRUCTURED_DETERMINISTIC_TAGS:
+            doc_suggestions = doc_suggestions or []
+            return _build_structured_answer_response(
+                client=client,
+                question=question,
+                answer_text=structured_answer_text,
+                sources=structured_sources,
+                doc_suggestions=doc_suggestions,
+                start_time=start_time,
+                settings=settings,
+                payload=payload,
+                tag=structured_model_name,
+            )
 
     if not structured_result and structured_intent:
         fallback = _structured_intent_fallback(question, intent_label=structured_intent)
@@ -1466,6 +1961,7 @@ def answer_question(
             max_chunks=settings.qa_max_chunks,
             similarity_threshold=settings.qa_similarity_threshold,
             grade_tag=payload.grade or "Grade 3",
+            settings=settings,
         )
     except Exception as exc:  # pragma: no cover - network outages, Supabase errors
         logger.exception("Retrieval failed while querying Supabase", exc_info=exc)
@@ -1487,30 +1983,11 @@ def answer_question(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Knowledge base temporarily unavailable") from exc
 
     print(
-        "[QA][retrieval] vector hits:",
+        "[QA][retrieval] hybrid hits:",
         len(hits),
         "top sim:",
         hits[0].similarity if hits else None,
     )
-
-    keyword_hits = _fetch_keyword_hits(client, question, settings.qa_max_chunks)
-    print("[QA][retrieval] keyword hits:", len(keyword_hits))
-    if keyword_hits:
-        keyed_hits: Dict[tuple[str, int], ChunkHit] = {
-            (hit.document_id, hit.chunk_index): hit for hit in hits
-        }
-        for keyword_hit in keyword_hits:
-            key = (keyword_hit.document_id, keyword_hit.chunk_index)
-            existing = keyed_hits.get(key)
-            if existing:
-                if keyword_hit.similarity > existing.similarity:
-                    existing.similarity = keyword_hit.similarity
-                existing.score = max(existing.score, keyword_hit.score, keyword_hit.similarity)
-                if len(keyword_hit.content) > len(existing.content):
-                    existing.content = keyword_hit.content
-            else:
-                hits.append(keyword_hit)
-                keyed_hits[key] = keyword_hit
 
     for entry in calendar_matches or []:
         doc_id = f"calendar:{entry['title'].lower().replace(' ', '-')[:40]}"
@@ -1573,6 +2050,8 @@ def answer_question(
             )
         )
 
+    rerank_metrics: Optional[dict] = None
+
     doc_ids: List[str] = []
     for hit in hits:
         if hit.document_id.startswith("manual:") or hit.document_id.startswith("calendar:"):
@@ -1608,13 +2087,22 @@ def answer_question(
         if added_hits:
             print("[QA][retrieval] added", added_hits, "hits from doc suggestions")
 
+    if hits and settings.enable_reranker:
+        hits, rerank_metrics = rerank_hits(
+            question,
+            hits,
+            settings=settings,
+        )
+        if rerank_metrics:
+            print("[QA][rerank] metrics:", rerank_metrics)
+
     if hits:
         preview = [
             {
                 "doc_id": hit.document_id,
                 "title": hit.document_title,
                 "similarity": round(hit.similarity, 3),
-                "score": round(getattr(hit, "score", hit.similarity), 3),
+                "score": round(getattr(hit, "rerank_score", hit.score), 3),
             }
             for hit in hits[:6]
         ]
@@ -1623,7 +2111,7 @@ def answer_question(
     if hits:
         hits.sort(
             key=lambda h: (
-                getattr(h, "score", h.similarity),
+                getattr(h, "rerank_score", getattr(h, "score", h.similarity)),
                 h.similarity,
                 h.published_on or dt.date.min,
             ),

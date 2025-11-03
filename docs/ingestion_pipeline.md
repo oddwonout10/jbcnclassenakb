@@ -8,8 +8,9 @@ This document explains how circulars and calendar PDFs/screenshots are processed
 2. **Ingestion run** – `python -m ingestion.ingest_documents`:
    - Computes SHA-256 checksum to deduplicate uploads (`documents.source_sha256` unique index).
    - Extracts text (PDF text layer, or OCR via Tesseract for images/scanned PDFs).
-   - Normalises whitespace and chunks text into ~800-word segments (200-word overlap).
-   - Uses `sentence-transformers/all-MiniLM-L6-v2` to embed each chunk.
+   - Builds layout-aware sections (headings, bullet lists, tables) and creates ~220-word chunks with 40-word overlaps, falling back to page-based windowing when structure is absent.
+   - Generates 2–3 highlights per circular from the section tree so deterministic answers can surface key takeaways.
+   - Uses `sentence-transformers/all-MiniLM-L6-v2` (via OpenAI `text-embedding-3-small`) to embed each chunk.
    - Derives `published_on` date by parsing filenames and in-document dates (latest found wins; defaults to today if none).
    - Uploads binary file to Supabase Storage (`class-circulars` bucket) and writes metadata to `documents`.
    - Inserts chunks + embeddings into `document_chunks`, storing the same `published_on` so retrieval can rank by recency.
@@ -50,3 +51,32 @@ For edge cases where automatic date parsing fails, create a JSON/YAML file with 
 ```
 
 When present, the ingestion script will top-up inferred metadata with explicit values, ensuring accurate recency sorting.
+
+## Structured chunking & highlights
+
+- Structured chunking is enabled by default. Disable it with
+  `INGESTION_USE_STRUCTURED_CHUNKING=false` (or `--no-structured` on the CLI) if
+  a particular run needs the legacy word-window behaviour.
+- Optional tuning knobs:
+  - `INGESTION_STRUCTURED_CHUNK_SIZE` (default 220 words)
+  - `INGESTION_STRUCTURED_CHUNK_OVERLAP` (default 40 words)
+  - CLI flags `--structured-chunk-size` and `--structured-chunk-overlap` override
+    these settings for a single run.
+- Apply the migration in `docs/migrations/document_highlights.sql` so the
+  generated summaries can be stored in Supabase.
+
+### Refreshing highlights after OCR improvements
+
+Legacy circulars that were ingested before the table-cleanup improvements may carry noisy highlight rows (e.g., repeated `Table: | ... |`). Run the refresh command to recompute them directly from the stored chunks:
+
+```bash
+cd backend
+PYTHONPATH=. python ingestion/ingest_documents.py refresh-highlights --limit 20
+```
+
+Key options:
+- `--document-id <uuid>` – refresh a specific circular (useful for spot fixes).
+- `--dry-run` – print existing and proposed bullets without writing to Supabase.
+- `--max-highlights N` – cap the number of bullets per document (default 3).
+
+The command skips calendar documents automatically and overwrites `document_highlights` for each processed circular.
