@@ -28,6 +28,7 @@ function formatDate(value?: string | null) {
 }
 
 export function CircularsInfo() {
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "";
   const [items, setItems] = useState<CircularItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -38,7 +39,6 @@ export function CircularsInfo() {
       try {
         setIsLoading(true);
         setLoadError(null);
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
         if (!backendUrl) {
           throw new Error("Backend URL is not configured.");
         }
@@ -98,8 +98,13 @@ export function CircularsInfo() {
       }
     }
 
-    loadCirculars();
-  }, []);
+    if (backendUrl) {
+      loadCirculars();
+    } else {
+      setLoadError("Backend URL is not configured.");
+      setIsLoading(false);
+    }
+  }, [backendUrl]);
 
   return (
     <section className="flex h-full flex-col gap-4 rounded-3xl border border-[#dff7f0] bg-[#fbfffe] p-6 shadow-[0_15px_30px_rgba(67,192,246,0.2)]">

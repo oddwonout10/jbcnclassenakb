@@ -4,6 +4,38 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { CalendarEvent } from "@/lib/types";
 
+const ALLOWED_AUDIENCE = new Set<string>([
+  "whole_school",
+  "whole_school_holiday",
+  "primary",
+  "primary_secondary",
+  "general",
+]);
+
+const AUDIENCE_PRIORITY: Record<string, number> = {
+  primary: 0,
+  primary_secondary: 1,
+  whole_school: 2,
+  whole_school_holiday: 3,
+  general: 4,
+  secondary: 5,
+  pre_primary: 6,
+};
+
+function scoreEventAudience(audience: string[] | null | undefined): number {
+  if (!audience || audience.length === 0) {
+    return AUDIENCE_PRIORITY.general;
+  }
+  let best = AUDIENCE_PRIORITY.general;
+  for (const entry of audience) {
+    const normalized = entry.toLowerCase();
+    if (normalized in AUDIENCE_PRIORITY) {
+      best = Math.min(best, AUDIENCE_PRIORITY[normalized]);
+    }
+  }
+  return best;
+}
+
 function formatDateRange(start: string, end: string | null) {
   const startDate = new Date(start);
   if (Number.isNaN(startDate.getTime())) return start;
@@ -37,37 +69,6 @@ export function UpcomingEvents() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const allowedAudience = new Set<string>([
-    "whole_school",
-    "whole_school_holiday",
-    "primary",
-    "primary_secondary",
-    "general",
-  ]);
-  const audiencePriority: Record<string, number> = {
-    primary: 0,
-    primary_secondary: 1,
-    whole_school: 2,
-    whole_school_holiday: 3,
-    general: 4,
-    secondary: 5,
-    pre_primary: 6,
-  };
-
-  function scoreEventAudience(audience: string[] | null | undefined): number {
-    if (!audience || audience.length === 0) {
-      return audiencePriority.general;
-    }
-    let best = audiencePriority.general;
-    for (const entry of audience) {
-      const normalized = entry.toLowerCase();
-      if (normalized in audiencePriority) {
-        best = Math.min(best, audiencePriority[normalized]);
-      }
-    }
-    return best;
-  }
-
   useEffect(() => {
     async function loadEvents() {
       if (!supabase) return;
@@ -94,7 +95,7 @@ export function UpcomingEvents() {
         }
         return tags.some((entry: string) => {
           const normalized = entry.toLowerCase();
-          return allowedAudience.has(normalized);
+          return ALLOWED_AUDIENCE.has(normalized);
         });
       });
 
@@ -165,7 +166,7 @@ export function UpcomingEvents() {
             : [];
           const tagRaw =
             audiences.find((entry) =>
-              allowedAudience.has(entry.toLowerCase())
+              ALLOWED_AUDIENCE.has(entry.toLowerCase())
             ) ?? "general";
           const tag = tagRaw.toLowerCase();
 
