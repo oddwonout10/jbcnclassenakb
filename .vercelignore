@@ -1,7 +1,0 @@
-backend/
-ingestion/
-data/
-docs/
-scripts/
-.env.example
-runtime.txt
