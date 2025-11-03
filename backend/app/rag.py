@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, List, Sequence
 
-import numpy as np
 import re
 import logging
 from openai import OpenAI
+
+try:  # pragma: no cover - optional dependency
+    from sentence_transformers import CrossEncoder  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    CrossEncoder = None  # type: ignore[assignment]
 
 from .config import get_settings
 
@@ -15,6 +19,7 @@ from .config import get_settings
 _EMBED_MODEL_NAME = "text-embedding-3-small"
 _EMBED_DIMENSION = 768
 _OPENAI_CLIENT: OpenAI | None = None
+_RERANKER_CACHE: tuple[str, CrossEncoder] | None = None  # type: ignore[type-arg]
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,27 @@ def _get_openai_client() -> OpenAI:
     return _OPENAI_CLIENT
 
 
+def _get_reranker(model_name: str) -> CrossEncoder | None:  # type: ignore[name-defined]
+    if CrossEncoder is None:  # pragma: no cover - optional dependency
+        logger.debug("CrossEncoder dependency not installed; skipping reranking.")
+        return None
+
+    global _RERANKER_CACHE
+    cached = _RERANKER_CACHE
+    if cached and cached[0] == model_name:
+        return cached[1]
+
+    try:
+        model = CrossEncoder(model_name, max_length=512)
+    except Exception as exc:  # pragma: no cover - model load failures
+        logger.warning("Failed to load reranker model %s: %s", model_name, exc)
+        return None
+
+    _RERANKER_CACHE = (model_name, model)
+    logger.info("Loaded reranker model %s", model_name)
+    return model
+
+
 @dataclass
 class ChunkHit:
     document_id: str
@@ -68,6 +94,9 @@ class ChunkHit:
     page_number: int | None = None
     section_heading: str | None = None
     score: float = 0.0
+    rerank_score: float | None = None
+    vector_score: float | None = None
+    keyword_score: float | None = None
 
 
 STOPWORDS = {
@@ -129,21 +158,6 @@ def _extract_keywords(question: str, limit: int = 5) -> List[str]:
     return keywords
 
 
-def _keyword_variants(keyword: str) -> List[str]:
-    variants = {keyword}
-    if keyword.endswith("s") and len(keyword) > 3:
-        variants.add(keyword[:-1])
-    if keyword.endswith("es") and len(keyword) > 4:
-        variants.add(keyword[:-2])
-    if keyword.endswith("ed") and len(keyword) > 4:
-        variants.add(keyword[:-2])
-    if keyword.endswith("ing") and len(keyword) > 5:
-        variants.add(keyword[:-3])
-    if len(keyword) >= 7:
-        variants.add(keyword[:5])
-    return [variant for variant in variants if len(variant) >= 3]
-
-
 def parse_date(value) -> dt.date | None:
     if not value:
         return None
@@ -155,78 +169,52 @@ def parse_date(value) -> dt.date | None:
         return None
 
 
-def _keyword_document_matches(
+def _fetch_fuzzy_chunk_hits(
     *,
     client,
     question: str,
-    grade_tag: str,
-    max_documents: int,
-    chunks_per_document: int,
-    question_embedding: np.ndarray,
+    limit: int,
 ) -> List[ChunkHit]:
-    keywords = _extract_keywords(question)
-    if not keywords:
+    if limit <= 0:
+        return []
+    try:
+        response = client.rpc(
+            "match_document_chunks_fuzzy",
+            {"q": question, "limit_count": limit},
+        ).execute()
+    except Exception as exc:  # pragma: no cover - Supabase RPC failure
+        logger.warning("Keyword search RPC failed: %s", exc)
         return []
 
-    doc_query = (
-        client.table("documents")
-        .select(
-            "id,title,original_filename,storage_path,published_on,grade_tags,event_tags"
-        )
-        .contains("grade_tags", [grade_tag])
-    )
-
-    expanded_terms: List[str] = []
-    for kw in keywords:
-        expanded_terms.extend(_keyword_variants(kw))
-    unique_terms = []
-    seen_terms = set()
-    for term in expanded_terms:
-        if term not in seen_terms:
-            unique_terms.append(term)
-            seen_terms.add(term)
-
-    or_clauses = ",".join(f"title.ilike.%{term}%" for term in unique_terms)
-    if or_clauses:
-        doc_query = doc_query.or_(or_clauses)
-
-    doc_resp = doc_query.limit(max_documents).execute()
-    documents = doc_resp.data or []
-    if not documents:
-        return []
-
+    rows = response.data or []
     hits: List[ChunkHit] = []
-
-    for doc in documents:
-        chunk_resp = (
-            client.table("document_chunks")
-            .select("document_id,chunk_index,content,published_on,page_number,section_heading")
-            .eq("document_id", doc["id"])
-            .order("chunk_index")
-            .limit(chunks_per_document)
-            .execute()
-        )
-        chunk_rows = chunk_resp.data or []
-        chunk_texts = [row["content"] for row in chunk_rows]
-        embeddings = embed_texts(chunk_texts)
-        for row, emb in zip(chunk_rows, embeddings):
-            chunk_embedding = np.array(emb, dtype=float)
-            similarity = float(np.dot(question_embedding, chunk_embedding))
-            hit = ChunkHit(
-                document_id=row["document_id"],
-                chunk_index=row.get("chunk_index", 0),
-                content=row["content"],
+    for row in rows:
+        document_id = row.get("document_id")
+        if not document_id:
+            continue
+        chunk_index = row.get("chunk_index") or 0
+        try:
+            similarity = float(row.get("similarity") or 0.0)
+        except (TypeError, ValueError):
+            similarity = 0.0
+        similarity = max(0.0, min(1.0, similarity))
+        published_on = parse_date(row.get("published_on"))
+        hits.append(
+            ChunkHit(
+                document_id=document_id,
+                chunk_index=chunk_index,
+                content=row.get("content") or "",
                 similarity=similarity,
-                document_title=doc.get("title", "Untitled"),
-                original_filename=doc.get("original_filename", ""),
-                published_on=parse_date(doc.get("published_on")),
-                storage_path=doc.get("storage_path", ""),
+                document_title=row.get("document_title") or row.get("title") or "Untitled",
+                original_filename=row.get("original_filename") or "",
+                published_on=published_on,
+                storage_path=row.get("storage_path") or "",
+                score=similarity,
+                keyword_score=similarity,
                 page_number=row.get("page_number"),
                 section_heading=row.get("section_heading"),
             )
-            recency = _compute_recency_boost(hit.published_on)
-            hit.score = 0.85 * hit.similarity + 0.15 * recency
-            hits.append(hit)
+        )
     return hits
 
 
@@ -238,63 +226,149 @@ def fetch_relevant_chunks(
     max_chunks: int,
     similarity_threshold: float,
     grade_tag: str = "Grade 3",
+    settings=None,
 ) -> List[ChunkHit]:
+    config = settings or get_settings()
+    vector_limit = max(max_chunks, config.qa_vector_candidates)
     params = {
         "query_embedding": list(query_embedding),
         "match_threshold": similarity_threshold,
-        "match_count": max_chunks,
+        "match_count": vector_limit,
         "grade_tag": grade_tag,
     }
 
     response = client.rpc("match_document_chunks", params).execute()
     rows = response.data or []
 
-    q_embedding = np.array(list(query_embedding))
-
     hits_by_key: dict[tuple[str, int], ChunkHit] = {}
     for row in rows:
         key = (row["document_id"], row.get("chunk_index", 0))
+        vector_similarity = row.get("similarity") or 0.0
+        try:
+            vector_similarity = float(vector_similarity)
+        except (TypeError, ValueError):
+            vector_similarity = 0.0
+        vector_similarity = max(0.0, min(1.0, vector_similarity))
         hit = ChunkHit(
             document_id=row["document_id"],
             chunk_index=row.get("chunk_index", 0),
             content=row["content"],
-            similarity=row["similarity"],
+            similarity=vector_similarity,
             document_title=row.get("document_title", "Untitled"),
             original_filename=row.get("original_filename", ""),
             published_on=parse_date(row.get("document_published_on")),
             storage_path=row.get("storage_path", ""),
-             page_number=row.get("page_number"),
-             section_heading=row.get("section_heading"),
+            page_number=row.get("page_number"),
+            section_heading=row.get("section_heading"),
+            vector_score=vector_similarity,
         )
-        recency = _compute_recency_boost(hit.published_on)
-        hit.score = 0.85 * hit.similarity + 0.15 * recency
         hits_by_key[key] = hit
 
-    keyword_hits = _keyword_document_matches(
+    fuzzy_hits = _fetch_fuzzy_chunk_hits(
         client=client,
         question=question,
-        grade_tag=grade_tag,
-        max_documents=max_chunks,
-        chunks_per_document=2,
-        question_embedding=q_embedding,
+        limit=config.qa_keyword_candidates,
     )
-
-    for hit in keyword_hits:
-        key = (hit.document_id, hit.chunk_index)
+    for fuzzy_hit in fuzzy_hits:
+        key = (fuzzy_hit.document_id, fuzzy_hit.chunk_index)
         existing = hits_by_key.get(key)
         if existing:
-            # Keep the higher similarity score if keyword hit beats vector score
-            if hit.similarity > existing.similarity:
-                hits_by_key[key] = hit
+            existing.keyword_score = max(existing.keyword_score or 0.0, fuzzy_hit.keyword_score or 0.0)
+            if not existing.content or len(fuzzy_hit.content) > len(existing.content):
+                existing.content = fuzzy_hit.content
+            if (existing.similarity or 0.0) < (existing.keyword_score or 0.0):
+                existing.similarity = existing.keyword_score or existing.similarity
         else:
-            hits_by_key[key] = hit
+            hits_by_key[key] = fuzzy_hit
 
     hits = list(hits_by_key.values())
     for hit in hits:
         recency = _compute_recency_boost(hit.published_on)
-        hit.score = 0.85 * hit.similarity + 0.15 * recency
+        vector_component = config.qa_vector_weight * (hit.vector_score or 0.0)
+        lexical_component = config.qa_keyword_weight * (hit.keyword_score or 0.0)
+        recency_component = config.qa_recency_weight * recency
+        hit.score = vector_component + lexical_component + recency_component
+        if not hit.similarity:
+            hit.similarity = max(hit.vector_score or 0.0, hit.keyword_score or 0.0)
     hits.sort(
         key=lambda h: (h.score, h.similarity, h.published_on or dt.date.min),
         reverse=True,
     )
     return hits[:max_chunks]
+
+
+def rerank_hits(
+    question: str,
+    hits: Sequence[ChunkHit],
+    *,
+    settings,
+) -> tuple[List[ChunkHit], dict]:
+    if not hits:
+        return list(hits), {"applied": False}
+
+    adjusted: List[ChunkHit] = [replace(hit) for hit in hits]
+    reranker = _get_reranker(settings.reranker_model)
+    rerank_weight = settings.reranker_weight
+    max_passages = min(settings.reranker_max_passages, len(adjusted))
+    metrics: dict = {"applied": False}
+
+    scores: List[float] = []
+    if reranker and max_passages:
+        pairs = [[question, adjusted[idx].content] for idx in range(max_passages)]
+        try:
+            raw_scores = reranker.predict(pairs)  # type: ignore[call-arg]
+            if hasattr(raw_scores, "tolist"):
+                raw_scores = raw_scores.tolist()
+            scores = [float(score) for score in raw_scores]
+        except Exception as exc:  # pragma: no cover - inference errors
+            logger.warning("Reranker prediction failed: %s", exc)
+            scores = []
+
+    if scores:
+        max_score = max(scores)
+        min_score = min(scores)
+        if max_score == min_score:
+            normalized = [0.5] * len(scores)
+        else:
+            span = max_score - min_score
+            normalized = [(score - min_score) / span for score in scores]
+
+        for idx, norm_score in enumerate(normalized):
+            hit = adjusted[idx]
+            hit.rerank_score = hit.score + rerank_weight * norm_score
+
+        for idx in range(len(normalized), len(adjusted)):
+            hit = adjusted[idx]
+            hit.rerank_score = hit.score
+
+        metrics = {
+            "applied": True,
+            "model": settings.reranker_model,
+            "passages_scored": len(scores),
+        }
+    else:
+        keywords = set(_extract_keywords(question, limit=8))
+        metrics = {
+            "applied": False,
+            "reason": "model_unavailable",
+            "keywords": list(sorted(keywords)),
+        }
+        for idx, hit in enumerate(adjusted):
+            keyword_hits = 0.0
+            title_lower = hit.document_title.lower()
+            content_lower = hit.content.lower()
+            for kw in keywords:
+                if kw in title_lower:
+                    keyword_hits += 1.0
+                elif kw in content_lower:
+                    keyword_hits += 0.35
+            position_penalty = 0.015 * idx
+            hit.rerank_score = hit.score + rerank_weight * keyword_hits - position_penalty
+
+    adjusted.sort(
+        key=lambda hit: (hit.rerank_score or hit.score, hit.score),
+        reverse=True,
+    )
+    metrics.setdefault("top_titles", [hit.document_title for hit in adjusted[:3]])
+    logger.debug("Rerank metrics: %s", metrics)
+    return adjusted, metrics

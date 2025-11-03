@@ -114,8 +114,17 @@ def qa_test_client(monkeypatch) -> TestClient:
         cohere_model="command",
         qa_similarity_threshold=0.72,
         qa_max_chunks=6,
+        qa_vector_candidates=12,
+        qa_keyword_candidates=12,
+        qa_vector_weight=0.7,
+        qa_keyword_weight=0.35,
+        qa_recency_weight=0.12,
         turnstile_secret_key=None,
         qa_rate_limit_per_minute=60,
+        enable_reranker=False,
+        reranker_weight=0.0,
+        reranker_model="BAAI/bge-reranker-base",
+        reranker_max_passages=24,
     )
 
     dummy_supabase = DummySupabase()
@@ -173,7 +182,6 @@ def test_answer_question_uses_circular_llm_flow(qa_test_client: TestClient, monk
     monkeypatch.setattr(qa_routes, "upcoming_holiday_event", lambda *_args, **_kwargs: {"current": None, "next": None})
     monkeypatch.setattr(qa_routes, "resolve_calendar_question", lambda **_kwargs: None)
     monkeypatch.setattr(qa_routes, "_fetch_document_fuzzy", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(qa_routes, "_fetch_keyword_hits", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(qa_routes, "_fetch_document_metadata", lambda *_args, **_kwargs: {
         "doc-1": {
             "title": "Uniform Update",
@@ -230,6 +238,53 @@ def test_answer_question_uses_circular_llm_flow(qa_test_client: TestClient, monk
     assert data["answer"].startswith("Circular answer about uniforms.")
     assert data["sources"][0]["document_id"] == "doc-1"
     assert "Circulars and documents" in captured_prompt["prompt"]
+
+
+def test_structured_contact_short_circuits_llm(qa_test_client: TestClient, monkeypatch):
+    structured_source = qa_routes.SourceInfo(
+        document_id="doc-contact",
+        title="Transport Contact",
+        published_on="2025-08-10",
+        original_filename="transport-contact.pdf",
+        signed_url=None,
+        storage_path="documents/transport-contact.pdf",
+        similarity=1.0,
+    )
+
+    monkeypatch.setattr(qa_routes, "fetch_calendar_context", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(qa_routes, "fetch_calendar_events_for_window", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(qa_routes, "upcoming_holiday_event", lambda *_args, **_kwargs: {"current": None, "next": None})
+    monkeypatch.setattr(qa_routes, "resolve_calendar_question", lambda **_kwargs: None)
+    monkeypatch.setattr(qa_routes, "_fetch_document_fuzzy", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        qa_routes,
+        "_fetch_document_highlights",
+        lambda _client, _doc_id, limit=3: ["Please write to transport@jbcn.org for bus queries."],
+    )
+    monkeypatch.setattr(qa_routes, "_fetch_first_chunk_snippet", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(qa_routes, "fetch_relevant_chunks", lambda **_kwargs: pytest.fail("retrieval should not run"))
+    monkeypatch.setattr(qa_routes, "generate_answer", lambda *_args, **_kwargs: pytest.fail("LLM should not run"))
+
+    def fake_structured_lookup(**_kwargs):
+        return ((
+            "For transport queries, contact Mr. Khan at transport@jbcn.org or 9876543210.",
+            [structured_source],
+            "structured-contact",
+        ), "contact")
+
+    monkeypatch.setattr(qa_routes, "_lookup_structured_fact", fake_structured_lookup)
+
+    response = qa_test_client.post(
+        "/qa",
+        json={"question": "Who do I contact for transport?", "grade": "Grade 3"},
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["status"] == "answered"
+    assert "transport@jbcn.org" in data["answer"]
+    assert "Highlights:" in data["answer"]
+    assert data["sources"][0]["document_id"] == "doc-contact"
 
 
 def test_calendar_answer_appends_circular_suggestions(qa_test_client: TestClient, monkeypatch):

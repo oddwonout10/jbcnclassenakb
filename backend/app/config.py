@@ -35,6 +35,18 @@ def _env_int(name: str, default: int) -> int:
         raise RuntimeError(f"Environment variable {name} must be an integer") from exc
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Environment variable {name} must be a boolean (true/false).")
+
+
 def _env_optional(name: str) -> Optional[str]:
     value = os.getenv(name)
     if value is None or value.strip() == "":
@@ -71,8 +83,17 @@ class Settings:
     cohere_model: str
     qa_similarity_threshold: float
     qa_max_chunks: int
+    qa_vector_candidates: int
+    qa_keyword_candidates: int
+    qa_vector_weight: float
+    qa_keyword_weight: float
+    qa_recency_weight: float
     turnstile_secret_key: Optional[str]
     qa_rate_limit_per_minute: int
+    enable_reranker: bool
+    reranker_weight: float
+    reranker_model: str
+    reranker_max_passages: int
 
 
 @lru_cache(maxsize=1)
@@ -112,6 +133,15 @@ def get_settings() -> Settings:
         cohere_model=os.getenv("COHERE_MODEL", "command"),
         qa_similarity_threshold=float(os.getenv("QA_SIMILARITY_THRESHOLD", "0.72")),
         qa_max_chunks=_env_int("QA_MAX_CHUNKS", 6),
+        qa_vector_candidates=_env_int("QA_VECTOR_CANDIDATES", 12),
+        qa_keyword_candidates=_env_int("QA_KEYWORD_CANDIDATES", 12),
+        qa_vector_weight=float(os.getenv("QA_VECTOR_WEIGHT", "0.7")),
+        qa_keyword_weight=float(os.getenv("QA_KEYWORD_WEIGHT", "0.35")),
+        qa_recency_weight=float(os.getenv("QA_RECENCY_WEIGHT", "0.12")),
         turnstile_secret_key=_env_optional("TURNSTILE_SECRET_KEY"),
         qa_rate_limit_per_minute=_env_int("QA_RATE_LIMIT_PER_MINUTE", 60),
+        enable_reranker=_env_bool("QA_ENABLE_RERANKER", True),
+        reranker_weight=float(os.getenv("QA_RERANKER_WEIGHT", "0.35")),
+        reranker_model=os.getenv("QA_RERANKER_MODEL", "BAAI/bge-reranker-base"),
+        reranker_max_passages=_env_int("QA_RERANKER_MAX_PASSAGES", 24),
     )

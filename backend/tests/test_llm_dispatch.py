@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -15,6 +16,7 @@ def settings_openai(monkeypatch) -> Settings:
         supabase_anon_key="anon",
         supabase_service_role_key="service",
         app_env="test",
+        cors_allow_origins=("http://localhost:3000",),
         escalation_email_to="test@example.com",
         escalation_email_from="test@example.com",
         smtp_username="test@example.com",
@@ -35,10 +37,21 @@ def settings_openai(monkeypatch) -> Settings:
         cohere_model="command",
         qa_similarity_threshold=0.72,
         qa_max_chunks=6,
+        qa_vector_candidates=12,
+        qa_keyword_candidates=12,
+        qa_vector_weight=0.7,
+        qa_keyword_weight=0.35,
+        qa_recency_weight=0.12,
+        turnstile_secret_key=None,
+        qa_rate_limit_per_minute=60,
+        enable_reranker=True,
+        reranker_weight=0.35,
+        reranker_model="BAAI/bge-reranker-base",
+        reranker_max_passages=24,
     )
 
 
 def test_generate_answer_with_missing_key(settings_openai):
-    settings_openai.openai_api_key = None
+    settings_missing_key = replace(settings_openai, openai_api_key=None)
     with pytest.raises(LLMClientError):
-        generate_answer("test", settings_openai)
+        generate_answer("test", settings_missing_key)

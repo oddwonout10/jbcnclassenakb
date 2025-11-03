@@ -1,0 +1,65 @@
+[
+  {
+    "question": "hows the weather today?",
+    "expected_status": "unsupported",
+    "notes": "Weather questions should be declined; no circular provides this info."
+  },
+  {
+    "question": "is it going to rain today",
+    "expected_status": "unsupported",
+    "notes": "Weather forecast is out of scope; expect a polite unsupported response."
+  },
+  {
+    "question": "I am feeling very low today. can you help me?",
+    "expected_status": "escalated",
+    "notes": "Emotional support requests should trigger escalation or safe fallback."
+  },
+  {
+    "question": "school ranking",
+    "expected_status": "answered",
+    "required_document_ids": [
+      "9d8e658c-12e4-4f3f-83ac-6a3d8d80c9ab"
+    ],
+    "notes": "Should cite the national rankings circular."
+  },
+  {
+    "question": "show me circular on school ranking",
+    "expected_status": "answered",
+    "required_document_ids": [
+      "9d8e658c-12e4-4f3f-83ac-6a3d8d80c9ab"
+    ],
+    "notes": "Should surface the relevant ranking circular directly."
+  },
+  {
+    "question": "who is on the pta?",
+    "expected_status": "answered",
+    "required_document_ids": [
+      "78899dee-e727-49b6-9e6b-608a22956285"
+    ],
+    "notes": "Expect answer citing the PTA executive committee circular."
+  },
+  {
+    "question": "tell me in detail about Nashik trip",
+    "expected_status": "answered",
+    "required_document_ids": [
+      "68ab3fb5-966f-45cb-b2c2-fc8c19b1d8d5"
+    ],
+    "notes": "Detailed response must cite the Nashik orientation circular."
+  },
+  {
+    "question": "Who do I contact for transport?",
+    "expected_status": "answered",
+    "required_document_ids": [
+      "68572ef8-2aa4-4595-b04d-c394f58d721c"
+    ],
+    "notes": "Structured contact answer should cite the PTA/transport contact circular."
+  },
+  {
+    "question": "When does school resume after Diwali break?",
+    "expected_status": "answered",
+    "required_document_ids": [
+      "066f49cd-2f7a-427f-a971-f2f83e7c62a8"
+    ],
+    "notes": "Structured date answer should cite the Diwali clarification circular."
+  }
+]

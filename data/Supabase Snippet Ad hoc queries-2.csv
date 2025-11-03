@@ -1,0 +1,101 @@
+table_name,column_name,data_type
+calendar_events,id,uuid
+calendar_events,event_date,date
+calendar_events,end_date,date
+calendar_events,title,text
+calendar_events,description,text
+calendar_events,audience,ARRAY
+calendar_events,source,text
+calendar_events,created_at,timestamp with time zone
+contact_directory,id,uuid
+contact_directory,document_id,uuid
+contact_directory,contact_name,text
+contact_directory,role,text
+contact_directory,email,text
+contact_directory,phone,text
+contact_directory,notes,text
+contact_directory,created_at,timestamp with time zone
+contact_directory,updated_at,timestamp with time zone
+document_actions,id,uuid
+document_actions,document_id,uuid
+document_actions,description,text
+document_actions,due_date,date
+document_actions,audience,text
+document_actions,confidence,double precision
+document_actions,source_excerpt,text
+document_actions,created_at,timestamp with time zone
+document_chunks,id,uuid
+document_chunks,document_id,uuid
+document_chunks,chunk_index,integer
+document_chunks,content,text
+document_chunks,embedding,USER-DEFINED
+document_chunks,created_at,timestamp with time zone
+document_chunks,published_on,date
+document_chunks,page_number,integer
+document_chunks,section_heading,text
+document_contacts,id,uuid
+document_contacts,document_id,uuid
+document_contacts,contact_name,text
+document_contacts,role,text
+document_contacts,email,text
+document_contacts,phone,text
+document_contacts,notes,text
+document_contacts,created_at,timestamp with time zone
+document_dates,id,uuid
+document_dates,document_id,uuid
+document_dates,date_type,text
+document_dates,date_value,date
+document_dates,raw_text,text
+document_dates,confidence,double precision
+document_dates,created_at,timestamp with time zone
+document_entities,id,uuid
+document_entities,document_id,uuid
+document_entities,entity_value,text
+document_entities,entity_type,text
+document_entities,confidence,double precision
+document_entities,context,text
+document_entities,created_at,timestamp with time zone
+document_headings,id,uuid
+document_headings,document_id,uuid
+document_headings,page_number,integer
+document_headings,heading_text,text
+document_headings,heading_level,integer
+document_headings,created_at,timestamp with time zone
+document_ingest_jobs,id,uuid
+document_ingest_jobs,document_id,uuid
+document_ingest_jobs,status,text
+document_ingest_jobs,error_message,text
+document_ingest_jobs,started_at,timestamp with time zone
+document_ingest_jobs,finished_at,timestamp with time zone
+document_page_summaries,id,uuid
+document_page_summaries,document_id,uuid
+document_page_summaries,page_number,integer
+document_page_summaries,summary,text
+document_page_summaries,created_at,timestamp with time zone
+document_tables,id,uuid
+document_tables,document_id,uuid
+document_tables,page_number,integer
+document_tables,table_data,jsonb
+document_tables,created_at,timestamp with time zone
+documents,id,uuid
+documents,title,text
+documents,storage_path,text
+documents,doc_type,text
+documents,event_tags,ARRAY
+documents,grade_tags,ARRAY
+documents,published_on,date
+documents,uploaded_by,uuid
+documents,uploaded_at,timestamp with time zone
+documents,status,text
+documents,original_filename,text
+documents,source_sha256,text
+documents,file_size_bytes,bigint
+documents,page_count,integer
+documents,issued_on,date
+documents,effective_start_on,date
+documents,effective_end_on,date
+documents,title_confidence,double precision
+documents,audience,ARRAY
+event_schedule,id,uuid
+event_schedule,document_id,uuid
+event_schedule,event_name,text

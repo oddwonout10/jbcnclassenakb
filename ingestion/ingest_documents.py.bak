@@ -134,8 +134,6 @@ def upload_file(storage_path: str, local_path: Path, *, force: bool = False) -> 
         _ensure_storage_mimetype(storage_path, content_type)
 
 
-
-
 def _ensure_storage_mimetype(storage_path: str, content_type: str) -> None:
     client = get_supabase_client()
     bucket = get_settings().storage_bucket

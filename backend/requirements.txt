@@ -8,3 +8,4 @@ openai>=1.45.0
 requests>=2.31.0
 pytest>=8.3.3
 rapidfuzz>=3.8.0
+sentence-transformers>=3.0.1

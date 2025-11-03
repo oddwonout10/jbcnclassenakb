@@ -14,8 +14,9 @@ Centralized workspace for the Grade 3 JBCN Ena class knowledge base. The goal is
 
 - Install requirements: `pip install -r ingestion/requirements.txt` (requires system Tesseract + Poppler for OCR fallbacks).
 - Ensure `.env` contains Supabase credentials and `SUPABASE_STORAGE_BUCKET` if you customise the bucket name.
-- Drop new circulars into `data/circulars/`; run `python -m ingestion.ingest_documents` to upload files, deduplicate via SHA-256, extract text, create embeddings, and populate Supabase.
+- Drop new circulars into `data/circulars/`; run `python -m ingestion.ingest_documents` to upload files, deduplicate via SHA-256, extract text, create embeddings, and populate Supabase. Layout-aware chunking and highlight extraction run by default—use `INGESTION_USE_STRUCTURED_CHUNKING=false` or the `--no-structured` flag to fall back to legacy windowing if required.
 - Parse the yearly calendar into structured events with `python -m ingestion.calendar_events`; this populates `calendar_events` so Q&A can reason about holiday ranges and reopen dates.
+- Run the regression harness with `python backend/scripts/evaluate_baseline.py --backend-url http://127.0.0.1:8000 --limit 25 --expectations backend/evaluation/expectations_baseline.json`. The script now adds manual high-value questions (contact, deadlines) and exits non-zero if mismatches or request errors occur; pass `--no-fail` to collect metrics without failing CI.
 
 ## Core Stack
 
@@ -37,5 +38,6 @@ Centralized workspace for the Grade 3 JBCN Ena class knowledge base. The goal is
 - Default to Python for backend/worker code, TypeScript/React for the frontend.
 - Keep documents under 100 MB total; prefer PDF or PNG/JPEG screenshots.
 - Track system metrics (queries, escalations, top topics) via Supabase tables exposed in the admin UI.
+- The backend can load an optional cross-encoder reranker (`sentence-transformers`) for better document ordering; if the dependency is missing it falls back to keyword heuristics.
 
 See `docs/` for detailed architecture diagrams and operational runbooks as they are developed.

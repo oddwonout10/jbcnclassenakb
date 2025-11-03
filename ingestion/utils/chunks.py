@@ -10,6 +10,11 @@ class TextChunk:
     content: str
     page: Optional[int] = None
     heading: Optional[str] = None
+    section_id: Optional[str] = None
+    role: Optional[str] = None
+    heading_level: Optional[int] = None
+    page_end: Optional[int] = None
+    order: Optional[int] = None
 
 
 def chunk_text(

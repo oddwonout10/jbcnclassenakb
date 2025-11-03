@@ -35,6 +35,18 @@ def _env_int(name: str, default: int) -> int:
         raise RuntimeError(f"Environment variable {name} must be an integer") from exc
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Environment variable {name} must be a boolean (true/false).")
+
+
 @dataclass(frozen=True)
 class Settings:
     supabase_url: str
@@ -44,6 +56,9 @@ class Settings:
     chunk_size: int
     chunk_overlap: int
     metadata_path: Path | None
+    use_structured_chunking: bool
+    structured_chunk_size: int
+    structured_chunk_overlap: int
 
 
 @lru_cache(maxsize=1)
@@ -61,4 +76,7 @@ def get_settings() -> Settings:
         chunk_size=_env_int("INGESTION_CHUNK_SIZE", 800),
         chunk_overlap=_env_int("INGESTION_CHUNK_OVERLAP", 200),
         metadata_path=metadata_path,
+        use_structured_chunking=_env_bool("INGESTION_USE_STRUCTURED_CHUNKING", True),
+        structured_chunk_size=_env_int("INGESTION_STRUCTURED_CHUNK_SIZE", 220),
+        structured_chunk_overlap=_env_int("INGESTION_STRUCTURED_CHUNK_OVERLAP", 40),
     )
