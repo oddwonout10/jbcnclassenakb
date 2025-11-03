@@ -26,6 +26,7 @@ Centralized workspace for the Grade 3 JBCN Ena class knowledge base. The goal is
 - **Hosting:** Vercel (frontend) and Render (backend + worker) on free plans.
 - **Build tooling:** Frontend build pins Python 3.11 (see `frontend/runtime.txt` or `vercel.json`) so `sentence-transformers` installs binary wheels during Vercel builds.
 - **Caching:** The backend summaries keep a small in-process cache (256 entries, 24-hour TTL). Bump `SUMMARY_CACHE_VERSION` in the deployment environment after re-ingesting circulars to force cache refreshes if needed.
+- **Optional reranker:** Backend defaults to the lightweight keyword/rule fallback. To enable the cross-encoder reranker, install `sentence-transformers` separately and set `QA_ENABLE_RERANKER=true` in the environment.
 - **Email:** Gmail SMTP (app password) for escalation notifications.
 
 ## Immediate Milestones

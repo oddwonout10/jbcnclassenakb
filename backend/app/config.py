@@ -141,7 +141,7 @@ def get_settings() -> Settings:
         qa_recency_weight=float(os.getenv("QA_RECENCY_WEIGHT", "0.12")),
         turnstile_secret_key=_env_optional("TURNSTILE_SECRET_KEY"),
         qa_rate_limit_per_minute=_env_int("QA_RATE_LIMIT_PER_MINUTE", 60),
-        enable_reranker=_env_bool("QA_ENABLE_RERANKER", True),
+    enable_reranker=_env_bool("QA_ENABLE_RERANKER", False),
         reranker_weight=float(os.getenv("QA_RERANKER_WEIGHT", "0.35")),
         reranker_model=os.getenv("QA_RERANKER_MODEL", "BAAI/bge-reranker-base"),
         reranker_max_passages=_env_int("QA_RERANKER_MAX_PASSAGES", 24),
