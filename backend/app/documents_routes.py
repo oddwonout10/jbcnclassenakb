@@ -77,7 +77,7 @@ class RecentDocument(BaseModel):
 
 
 @router.get("/recent", response_model=List[RecentDocument])
-def recent_circulars(_guardian: dict = Depends(_require_guardian)) -> List[RecentDocument]:
+def recent_circulars() -> List[RecentDocument]:
     settings = get_settings()
     client = get_supabase_client(service_role=True)
 
@@ -154,15 +154,7 @@ def recent_circulars(_guardian: dict = Depends(_require_guardian)) -> List[Recen
 
 
 @router.get("/{document_id}/file")
-def fetch_document_file(document_id: str, access_token: str | None = Query(default=None)):
-    if not access_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing access token.",
-        )
-
-    _guardian_from_token(access_token)
-
+def fetch_document_file(document_id: str):
     settings = get_settings()
     client = get_supabase_client(service_role=True)
 
