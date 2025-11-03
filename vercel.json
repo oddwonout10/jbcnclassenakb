@@ -4,8 +4,7 @@
       "VERCEL_PYTHON_VERSION": "3.11"
     }
   },
-  "buildCommand": "cd frontend && npm run build",
-  "outputDirectory": "frontend/.next",
-  "installCommand": "cd frontend && npm install",
-  "framework": "nextjs"
+  "installCommand": "npm install --prefix frontend",
+  "buildCommand": "npm run build --prefix frontend",
+  "outputDirectory": "frontend/.next"
 }
